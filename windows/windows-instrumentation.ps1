@@ -285,6 +285,7 @@ Write-Host "Creating Collector configuration..." -ForegroundColor Green
 $customerLabel = ""
 if (-not [string]::IsNullOrWhiteSpace($CUSTOMER_NAME)) {
     $customerLabel = @"
+
       - action: insert
         key: customer
         value: "$CUSTOMER_NAME"
@@ -346,7 +347,8 @@ service:
       exporters: [prometheusremotewrite]
 "@
 
-$CONFIG_CONTENT | Out-File -FilePath $CONFIG_FILE -Encoding UTF8
+# Save with UTF8 encoding without BOM
+[System.IO.File]::WriteAllText($CONFIG_FILE, $CONFIG_CONTENT)
 Write-Host "✓ Configuration created!" -ForegroundColor Green
 
 # Validate configuration
