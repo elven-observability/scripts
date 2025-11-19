@@ -19,7 +19,7 @@ NC='\033[0m' # No Color
 
 # Versions
 NODE_EXPORTER_VERSION="1.8.2"
-OTEL_VERSION="0.114.0"
+OTEL_VERSION="0.139.0"
 
 # Directories
 INSTALL_DIR="/opt/monitoring"

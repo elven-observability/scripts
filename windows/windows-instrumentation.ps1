@@ -12,7 +12,7 @@ Write-Host ""
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # Variables
-$OTEL_VERSION = "0.114.0"
+$OTEL_VERSION = "0.139.0"
 $WINDOWS_EXPORTER_VERSION = "0.27.3"
 $INSTALL_DIR = "C:\Program Files\OpenTelemetry Collector"
 $EXPORTER_DIR = "C:\Program Files\Windows Exporter"
