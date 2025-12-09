@@ -312,6 +312,74 @@ stop_existing_services() {
     print_success "Clean!"
 }
 
+# Configure SELinux for monitoring tools
+configure_selinux() {
+    # Check if SELinux is installed and enforcing
+    if ! command -v getenforce &> /dev/null; then
+        return 0  # SELinux not installed, skip
+    fi
+    
+    local selinux_status=$(getenforce 2>/dev/null || echo "Disabled")
+    
+    if [ "$selinux_status" = "Disabled" ]; then
+        return 0  # SELinux disabled, nothing to do
+    fi
+    
+    print_info ""
+    print_info "SELinux detected ($selinux_status), configuring permissions..."
+    
+    # Install SELinux utilities if needed
+    if [ "$PKG_MANAGER" = "apt" ]; then
+        if ! command -v semanage &> /dev/null; then
+            print_info "  → Installing SELinux utilities..."
+            $PKG_INSTALL policycoreutils-python-utils 2>/dev/null || \
+            $PKG_INSTALL policycoreutils 2>/dev/null || true
+        fi
+    else
+        if ! command -v semanage &> /dev/null; then
+            print_info "  → Installing SELinux utilities..."
+            $PKG_INSTALL policycoreutils-python-utils 2>/dev/null || \
+            $PKG_INSTALL policycoreutils-python 2>/dev/null || true
+        fi
+    fi
+    
+    # Set proper SELinux contexts for binaries
+    print_info "  → Setting SELinux contexts..."
+    
+    # Node Exporter binary
+    if [ -f /opt/monitoring/node_exporter/node_exporter ]; then
+        chcon -t bin_t /opt/monitoring/node_exporter/node_exporter 2>/dev/null || true
+        restorecon -v /opt/monitoring/node_exporter/node_exporter 2>/dev/null || true
+    fi
+    
+    # OpenTelemetry Collector binary
+    if [ -f /opt/monitoring/otelcol/otelcol-contrib ]; then
+        chcon -t bin_t /opt/monitoring/otelcol/otelcol-contrib 2>/dev/null || true
+        restorecon -v /opt/monitoring/otelcol/otelcol-contrib 2>/dev/null || true
+    fi
+    
+    # Allow network binding for monitoring ports
+    if command -v semanage &> /dev/null; then
+        print_info "  → Configuring port permissions..."
+        semanage port -a -t http_port_t -p tcp 9100 2>/dev/null || \
+        semanage port -m -t http_port_t -p tcp 9100 2>/dev/null || true
+    fi
+    
+    # Set permissive domain for systemd services if needed
+    if [ "$selinux_status" = "Enforcing" ]; then
+        print_info "  → Adding SELinux policies for monitoring services..."
+        
+        # Allow systemd to execute our binaries
+        if command -v semanage &> /dev/null; then
+            semanage fcontext -a -t bin_t "/opt/monitoring/node_exporter/node_exporter" 2>/dev/null || true
+            semanage fcontext -a -t bin_t "/opt/monitoring/otelcol/otelcol-contrib" 2>/dev/null || true
+            restorecon -Rv /opt/monitoring 2>/dev/null || true
+        fi
+    fi
+    
+    print_success "SELinux configured!"
+}
+
 # Install Node Exporter
 install_node_exporter() {
     print_info ""
@@ -644,6 +712,7 @@ main() {
     stop_existing_services
     install_node_exporter
     install_otel_collector
+    configure_selinux
     print_summary
 }
 
