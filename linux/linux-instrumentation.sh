@@ -312,6 +312,33 @@ stop_existing_services() {
     print_success "Clean!"
 }
 
+# Set SELinux context for a binary
+set_selinux_binary_context() {
+    local binary_path=$1
+    
+    if ! command -v getenforce &> /dev/null; then
+        return 0  # SELinux not installed
+    fi
+    
+    local selinux_status=$(getenforce 2>/dev/null || echo "Disabled")
+    if [ "$selinux_status" = "Disabled" ]; then
+        return 0  # SELinux disabled
+    fi
+    
+    print_info "  → Setting SELinux context for $(basename $binary_path)..."
+    
+    # Set context directly
+    chcon -t bin_t "$binary_path" 2>/dev/null || true
+    
+    # Verify
+    local context=$(ls -Z "$binary_path" 2>/dev/null | awk '{print $1}')
+    if echo "$context" | grep -q "bin_t"; then
+        print_success "SELinux context: OK"
+    else
+        print_warning "SELinux context may need adjustment: $context"
+    fi
+}
+
 # Configure SELinux for monitoring tools
 configure_selinux() {
     # Check if SELinux is installed and enforcing
@@ -343,19 +370,45 @@ configure_selinux() {
         fi
     fi
     
-    # Set proper SELinux contexts for binaries
-    print_info "  → Setting SELinux contexts..."
-    
-    # Node Exporter binary
-    if [ -f /opt/monitoring/node_exporter/node_exporter ]; then
-        chcon -t bin_t /opt/monitoring/node_exporter/node_exporter 2>/dev/null || true
-        restorecon -v /opt/monitoring/node_exporter/node_exporter 2>/dev/null || true
+    # Add permanent SELinux file contexts FIRST
+    print_info "  → Adding permanent SELinux file contexts..."
+    if command -v semanage &> /dev/null; then
+        # Remove old contexts if they exist
+        semanage fcontext -d "/opt/monitoring/node_exporter/node_exporter" 2>/dev/null || true
+        semanage fcontext -d "/opt/monitoring/otelcol/otelcol-contrib" 2>/dev/null || true
+        
+        # Add new contexts as bin_t (executable type)
+        semanage fcontext -a -t bin_t "/opt/monitoring/node_exporter/node_exporter" 2>/dev/null || \
+        semanage fcontext -m -t bin_t "/opt/monitoring/node_exporter/node_exporter" 2>/dev/null || true
+        
+        semanage fcontext -a -t bin_t "/opt/monitoring/otelcol/otelcol-contrib" 2>/dev/null || \
+        semanage fcontext -m -t bin_t "/opt/monitoring/otelcol/otelcol-contrib" 2>/dev/null || true
+        
+        print_success "Permanent contexts added!"
+    else
+        print_warning "semanage not available, using temporary contexts"
     fi
     
-    # OpenTelemetry Collector binary
+    # Apply the contexts to actual files
+    print_info "  → Applying SELinux contexts to binaries..."
+    
+    if [ -f /opt/monitoring/node_exporter/node_exporter ]; then
+        chcon -t bin_t /opt/monitoring/node_exporter/node_exporter 2>/dev/null || true
+        restorecon -v /opt/monitoring/node_exporter/node_exporter 2>&1 | grep -v "restorecon reset" || true
+    fi
+    
     if [ -f /opt/monitoring/otelcol/otelcol-contrib ]; then
         chcon -t bin_t /opt/monitoring/otelcol/otelcol-contrib 2>/dev/null || true
-        restorecon -v /opt/monitoring/otelcol/otelcol-contrib 2>/dev/null || true
+        restorecon -v /opt/monitoring/otelcol/otelcol-contrib 2>&1 | grep -v "restorecon reset" || true
+    fi
+    
+    # Verify contexts were applied
+    print_info "  → Verifying contexts..."
+    local node_context=$(ls -Z /opt/monitoring/node_exporter/node_exporter 2>/dev/null | awk '{print $1}')
+    if echo "$node_context" | grep -q "bin_t"; then
+        print_success "Node Exporter context: OK ($node_context)"
+    else
+        print_warning "Node Exporter context may be incorrect: $node_context"
     fi
     
     # Allow network binding for monitoring ports
@@ -365,17 +418,9 @@ configure_selinux() {
         semanage port -m -t http_port_t -p tcp 9100 2>/dev/null || true
     fi
     
-    # Set permissive domain for systemd services if needed
-    if [ "$selinux_status" = "Enforcing" ]; then
-        print_info "  → Adding SELinux policies for monitoring services..."
-        
-        # Allow systemd to execute our binaries
-        if command -v semanage &> /dev/null; then
-            semanage fcontext -a -t bin_t "/opt/monitoring/node_exporter/node_exporter" 2>/dev/null || true
-            semanage fcontext -a -t bin_t "/opt/monitoring/otelcol/otelcol-contrib" 2>/dev/null || true
-            restorecon -Rv /opt/monitoring 2>/dev/null || true
-        fi
-    fi
+    # Reload systemd to pick up SELinux changes
+    print_info "  → Reloading systemd..."
+    systemctl daemon-reload
     
     print_success "SELinux configured!"
 }
@@ -444,6 +489,10 @@ EOF
 
     systemctl daemon-reload
     systemctl enable $NODE_EXPORTER_SERVICE > /dev/null 2>&1
+    
+    # Set SELinux context if needed
+    set_selinux_binary_context "$NODE_EXPORTER_DIR/node_exporter"
+    
     systemctl start $NODE_EXPORTER_SERVICE
 
     sleep 2
@@ -609,6 +658,10 @@ EOF
 
     systemctl daemon-reload
     systemctl enable $OTEL_SERVICE > /dev/null 2>&1
+    
+    # Set SELinux context if needed
+    set_selinux_binary_context "$OTEL_DIR/otelcol-contrib"
+    
     systemctl start $OTEL_SERVICE
 
     sleep 3
