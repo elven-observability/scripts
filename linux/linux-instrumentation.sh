@@ -262,6 +262,13 @@ get_user_input() {
         print_info "  → Using default: $ENVIRONMENT"
     fi
 
+    # Group with default
+    read -p "Group [default: vibra]: " GROUP < /dev/tty
+    if [ -z "$GROUP" ]; then
+        GROUP="vibra"
+        print_info "  → Using default: $GROUP"
+    fi
+
     # Mimir endpoint with default
     print_info ""
     while true; do
@@ -286,6 +293,7 @@ get_user_input() {
     [ -n "$CUSTOMER_NAME" ] && echo "  Customer:    $CUSTOMER_NAME"
     echo "  Environment: $ENVIRONMENT"
     echo "  Endpoint:    $MIMIR_ENDPOINT"
+    echo "  Group: $GROUP"
     print_info ""
 
     read -p "Confirm and continue? (y/n): " CONFIRM < /dev/tty
@@ -601,6 +609,9 @@ $customer_label
       - action: insert
         key: distro
         value: "$OS"
+      - action: insert
+        key: group
+        value: "$GROUP"
 
   batch:
     timeout: 10s
@@ -702,6 +713,7 @@ print_summary() {
     echo "  Instance:     $INSTANCE_NAME"
     [ -n "$CUSTOMER_NAME" ] && echo "  Customer:     $CUSTOMER_NAME"
     echo "  Environment:  $ENVIRONMENT"
+    echo "  Group:        $GROUP"
     echo "  Tenant ID:    $TENANT_ID"
     echo "  Endpoint:     $MIMIR_ENDPOINT"
     echo "  Distribution: $OS_NAME"

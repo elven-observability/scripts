@@ -120,6 +120,13 @@ if ([string]::IsNullOrWhiteSpace($ENVIRONMENT)) {
     Write-Host "  → Using default: $ENVIRONMENT" -ForegroundColor Cyan
 }
 
+# Environment with default
+$GROUP = Read-Host "Group [default: vibra]"
+if ([string]::IsNullOrWhiteSpace($GROUP)) {
+    $GROUP = "production"
+    Write-Host "  → Using default: $GROUP" -ForegroundColor Cyan
+}
+
 # Mimir endpoint with default
 Write-Host ""
 do {
@@ -146,6 +153,7 @@ if (-not [string]::IsNullOrWhiteSpace($CUSTOMER_NAME)) {
 }
 Write-Host "  Environment: $ENVIRONMENT" -ForegroundColor White
 Write-Host "  Endpoint:    $MIMIR_ENDPOINT" -ForegroundColor White
+Write-Host "  Group:       $GROUP" -ForegroundColor White
 Write-Host ""
 
 $confirm = Read-Host "Confirm and continue? (y/n)"
@@ -323,6 +331,9 @@ processors:
       - action: insert
         key: os
         value: "windows"
+      - action: insert
+        key: group
+        value: "$GROUP"
 
   batch:
     timeout: 10s
@@ -463,6 +474,7 @@ if (-not [string]::IsNullOrWhiteSpace($CUSTOMER_NAME)) {
     Write-Host "  Customer:     $CUSTOMER_NAME" -ForegroundColor White
 }
 Write-Host "  Environment:  $ENVIRONMENT" -ForegroundColor White
+Write-Host "  Group:        $GROUP" -ForegroundColor White
 Write-Host "  Tenant ID:    $TENANT_ID" -ForegroundColor White
 Write-Host "  Endpoint:     $MIMIR_ENDPOINT" -ForegroundColor White
 Write-Host ""
