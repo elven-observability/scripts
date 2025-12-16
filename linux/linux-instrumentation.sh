@@ -18,8 +18,8 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Versions
-NODE_EXPORTER_VERSION="1.8.2"
-OTEL_VERSION="0.114.0"
+NODE_EXPORTER_VERSION="1.10.2"
+OTEL_VERSION="0.139.0"
 
 # Directories
 INSTALL_DIR="/opt/monitoring"
@@ -279,6 +279,50 @@ get_user_input() {
         fi
     done
 
+    # Custom labels (optional)
+    print_info ""
+    declare -A CUSTOM_LABELS_MAP
+    
+    # Check if CUSTOM_LABELS env var is set
+    if [ -n "$CUSTOM_LABELS" ]; then
+        print_info "Using custom labels from environment variable..."
+        # Parse CUSTOM_LABELS="key1=value1,key2=value2"
+        IFS=',' read -ra LABELS <<< "$CUSTOM_LABELS"
+        for label in "${LABELS[@]}"; do
+            if [[ $label =~ ^([^=]+)=(.+)$ ]]; then
+                CUSTOM_LABELS_MAP["${BASH_REMATCH[1]}"]="${BASH_REMATCH[2]}"
+            fi
+        done
+        
+        if [ ${#CUSTOM_LABELS_MAP[@]} -gt 0 ]; then
+            print_success "Loaded ${#CUSTOM_LABELS_MAP[@]} custom labels"
+            for key in "${!CUSTOM_LABELS_MAP[@]}"; do
+                echo "  $key: ${CUSTOM_LABELS_MAP[$key]}"
+            done
+        fi
+    else
+        # Interactive mode
+        read -p "Add custom labels? (e.g., group=BASPA, dept=TI) [y/n]: " ADD_LABELS < /dev/tty
+        if [ "$ADD_LABELS" = "y" ] || [ "$ADD_LABELS" = "Y" ]; then
+            print_info "Enter custom labels (press Enter without input to finish):"
+            while true; do
+                read -p "  Label name: " label_name < /dev/tty
+                if [ -z "$label_name" ]; then
+                    break
+                fi
+                read -p "  Label value: " label_value < /dev/tty
+                if [ -n "$label_value" ]; then
+                    CUSTOM_LABELS_MAP["$label_name"]="$label_value"
+                    print_success "Added: $label_name = $label_value"
+                fi
+            done
+            
+            if [ ${#CUSTOM_LABELS_MAP[@]} -gt 0 ]; then
+                print_success "Total custom labels: ${#CUSTOM_LABELS_MAP[@]}"
+            fi
+        fi
+    fi
+
     print_info ""
     print_success "Configuration summary:"
     echo "  Tenant ID:   $TENANT_ID"
@@ -286,6 +330,12 @@ get_user_input() {
     [ -n "$CUSTOMER_NAME" ] && echo "  Customer:    $CUSTOMER_NAME"
     echo "  Environment: $ENVIRONMENT"
     echo "  Endpoint:    $MIMIR_ENDPOINT"
+    if [ ${#CUSTOM_LABELS_MAP[@]} -gt 0 ]; then
+        echo "  Custom Labels:"
+        for key in "${!CUSTOM_LABELS_MAP[@]}"; do
+            echo "    - $key: ${CUSTOM_LABELS_MAP[$key]}"
+        done
+    fi
     print_info ""
 
     read -p "Confirm and continue? (y/n): " CONFIRM < /dev/tty
@@ -566,6 +616,17 @@ install_otel_collector() {
         value: \"$CUSTOMER_NAME\""
     fi
 
+    # Build custom labels if provided
+    local custom_labels_yaml=""
+    if [ ${#CUSTOM_LABELS_MAP[@]} -gt 0 ]; then
+        for key in "${!CUSTOM_LABELS_MAP[@]}"; do
+            custom_labels_yaml="${custom_labels_yaml}
+      - action: insert
+        key: $key
+        value: \"${CUSTOM_LABELS_MAP[$key]}\""
+        done
+    fi
+
     cat > $CONFIG_DIR/config.yaml <<EOF
 receivers:
   prometheus:
@@ -601,6 +662,7 @@ $customer_label
       - action: insert
         key: distro
         value: "$OS"
+$custom_labels_yaml
 
   batch:
     timeout: 10s

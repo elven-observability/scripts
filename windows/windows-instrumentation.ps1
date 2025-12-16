@@ -13,7 +13,7 @@ Write-Host ""
 
 # Variables
 $OTEL_VERSION = "0.139.0"
-$WINDOWS_EXPORTER_VERSION = "0.27.3"
+$WINDOWS_EXPORTER_VERSION = "0.31.3"
 $INSTALL_DIR = "C:\Program Files\OpenTelemetry Collector"
 $EXPORTER_DIR = "C:\Program Files\Windows Exporter"
 $CONFIG_FILE = "$INSTALL_DIR\config.yaml"
@@ -137,6 +137,49 @@ do {
     }
 } while ($true)
 
+# Custom labels (optional)
+Write-Host ""
+$CustomLabels = @{}
+
+# Check if CUSTOM_LABELS env var is set
+if ($env:CUSTOM_LABELS) {
+    Write-Host "Using custom labels from environment variable..." -ForegroundColor Cyan
+    # Parse CUSTOM_LABELS="key1=value1,key2=value2"
+    $env:CUSTOM_LABELS -split ',' | ForEach-Object {
+        if ($_ -match '^([^=]+)=(.+)$') {
+            $CustomLabels[$matches[1]] = $matches[2]
+        }
+    }
+    
+    if ($CustomLabels.Count -gt 0) {
+        Write-Host "  ✓ Loaded $($CustomLabels.Count) custom labels" -ForegroundColor Green
+        foreach ($key in $CustomLabels.Keys) {
+            Write-Host "    $key`: $($CustomLabels[$key])" -ForegroundColor White
+        }
+    }
+} else {
+    # Interactive mode
+    $addLabels = Read-Host "Add custom labels? (e.g., group=BASPA, dept=TI) [y/n]"
+    if ($addLabels -eq "y" -or $addLabels -eq "Y") {
+        Write-Host "Enter custom labels (press Enter without input to finish):" -ForegroundColor Cyan
+        while ($true) {
+            $labelName = Read-Host "  Label name"
+            if ([string]::IsNullOrWhiteSpace($labelName)) {
+                break
+            }
+            $labelValue = Read-Host "  Label value"
+            if (-not [string]::IsNullOrWhiteSpace($labelValue)) {
+                $CustomLabels[$labelName] = $labelValue
+                Write-Host "  ✓ Added: $labelName = $labelValue" -ForegroundColor Green
+            }
+        }
+        
+        if ($CustomLabels.Count -gt 0) {
+            Write-Host "  ✓ Total custom labels: $($CustomLabels.Count)" -ForegroundColor Green
+        }
+    }
+}
+
 Write-Host ""
 Write-Host "Summary:" -ForegroundColor Green
 Write-Host "  Tenant ID:  $TENANT_ID" -ForegroundColor White
@@ -146,6 +189,12 @@ if (-not [string]::IsNullOrWhiteSpace($CUSTOMER_NAME)) {
 }
 Write-Host "  Environment: $ENVIRONMENT" -ForegroundColor White
 Write-Host "  Endpoint:    $MIMIR_ENDPOINT" -ForegroundColor White
+if ($CustomLabels.Count -gt 0) {
+    Write-Host "  Custom Labels:" -ForegroundColor White
+    foreach ($key in $CustomLabels.Keys) {
+        Write-Host "    - $key`: $($CustomLabels[$key])" -ForegroundColor White
+    }
+}
 Write-Host ""
 
 $confirm = Read-Host "Confirm and continue? (y/n)"
@@ -292,6 +341,19 @@ if (-not [string]::IsNullOrWhiteSpace($CUSTOMER_NAME)) {
 "@
 }
 
+# Build custom labels if provided
+$customLabelsYaml = ""
+if ($CustomLabels.Count -gt 0) {
+    foreach ($key in $CustomLabels.Keys) {
+        $customLabelsYaml += @"
+
+      - action: insert
+        key: $key
+        value: "$($CustomLabels[$key])"
+"@
+    }
+}
+
 $CONFIG_CONTENT = @"
 receivers:
   prometheus:
@@ -322,7 +384,7 @@ processors:
         value: "$ENVIRONMENT"$customerLabel
       - action: insert
         key: os
-        value: "windows"
+        value: "windows"$customLabelsYaml
 
   batch:
     timeout: 10s
