@@ -48,6 +48,195 @@ function Stop-ServiceAndProcess {
     Write-Host "  ✓ Clean!" -ForegroundColor Green
 }
 
+# Pre-flight validation
+function Test-Prerequisites {
+    Write-Host "=== Pre-flight Checks ===" -ForegroundColor Cyan
+    Write-Host ""
+    
+    $allChecksPassed = $true
+    
+    # 1. Check Administrator privileges
+    Write-Host "1. Checking administrator privileges..." -ForegroundColor Yellow
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($isAdmin) {
+        Write-Host "   ✓ Running as Administrator" -ForegroundColor Green
+    } else {
+        Write-Host "   ✗ NOT running as Administrator!" -ForegroundColor Red
+        Write-Host "   Please run PowerShell as Administrator" -ForegroundColor Yellow
+        $allChecksPassed = $false
+    }
+    
+    # 2. Check internet connectivity
+    Write-Host "2. Checking internet connectivity..." -ForegroundColor Yellow
+    try {
+        $null = Test-NetConnection -ComputerName "github.com" -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction Stop
+        Write-Host "   ✓ Internet connection OK" -ForegroundColor Green
+    } catch {
+        try {
+            # Fallback test
+            $null = Invoke-WebRequest -Uri "https://www.google.com" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+            Write-Host "   ✓ Internet connection OK" -ForegroundColor Green
+        } catch {
+            Write-Host "   ✗ Cannot reach internet!" -ForegroundColor Red
+            Write-Host "   Check your network connection and proxy settings" -ForegroundColor Yellow
+            $allChecksPassed = $false
+        }
+    }
+    
+    # 3. Check if ports are available
+    Write-Host "3. Checking if required ports are free..." -ForegroundColor Yellow
+    $portsToCheck = @(
+        @{Port=9182; Service="Windows Exporter"},
+        @{Port=4317; Service="OpenTelemetry Collector"}
+    )
+    
+    foreach ($portInfo in $portsToCheck) {
+        $port = $portInfo.Port
+        $service = $portInfo.Service
+        
+        $portInUse = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+        if ($portInUse) {
+            $process = Get-Process -Id $portInUse.OwningProcess -ErrorAction SilentlyContinue
+            Write-Host "   ⚠ Port $port is in use by $($process.ProcessName) (PID: $($process.Id))" -ForegroundColor Yellow
+            Write-Host "     This port is needed for $service" -ForegroundColor Yellow
+            Write-Host "     The script will attempt to stop conflicting services" -ForegroundColor Cyan
+        } else {
+            Write-Host "   ✓ Port $port is available ($service)" -ForegroundColor Green
+        }
+    }
+    
+    # 4. Check disk space
+    Write-Host "4. Checking disk space..." -ForegroundColor Yellow
+    $systemDrive = Get-PSDrive -Name C -ErrorAction SilentlyContinue
+    if ($systemDrive) {
+        $freeSpaceGB = [math]::Round($systemDrive.Free / 1GB, 2)
+        if ($freeSpaceGB -lt 1) {
+            Write-Host "   ✗ Low disk space: ${freeSpaceGB}GB free" -ForegroundColor Red
+            Write-Host "   At least 1GB of free space is recommended" -ForegroundColor Yellow
+            $allChecksPassed = $false
+        } else {
+            Write-Host "   ✓ Disk space OK: ${freeSpaceGB}GB free" -ForegroundColor Green
+        }
+    }
+    
+    # 5. Check write permissions
+    Write-Host "5. Checking write permissions..." -ForegroundColor Yellow
+    $testDirs = @("C:\Program Files", "C:\Windows\Temp")
+    $canWriteAll = $true
+    
+    foreach ($dir in $testDirs) {
+        $testFile = Join-Path $dir "test_write_$(Get-Random).tmp"
+        try {
+            [System.IO.File]::WriteAllText($testFile, "test")
+            Remove-Item $testFile -Force -ErrorAction SilentlyContinue
+        } catch {
+            Write-Host "   ✗ Cannot write to: $dir" -ForegroundColor Red
+            $canWriteAll = $false
+        }
+    }
+    
+    if ($canWriteAll) {
+        Write-Host "   ✓ Write permissions OK" -ForegroundColor Green
+    } else {
+        Write-Host "   ✗ Insufficient write permissions!" -ForegroundColor Red
+        $allChecksPassed = $false
+    }
+    
+    # 6. Check if old installations exist
+    Write-Host "6. Checking for previous installations..." -ForegroundColor Yellow
+    $hasOldInstall = $false
+    
+    if (Test-Path "C:\Program Files\OpenTelemetry Collector") {
+        Write-Host "   ⚠ Found existing OpenTelemetry Collector installation" -ForegroundColor Yellow
+        $hasOldInstall = $true
+    }
+    
+    if (Test-Path "C:\Program Files\windows_exporter") {
+        Write-Host "   ⚠ Found existing Windows Exporter installation" -ForegroundColor Yellow
+        $hasOldInstall = $true
+    }
+    
+    $existingServices = @()
+    if (Get-Service -Name "otelcol" -ErrorAction SilentlyContinue) {
+        $existingServices += "otelcol"
+    }
+    if (Get-Service -Name "windows_exporter" -ErrorAction SilentlyContinue) {
+        $existingServices += "windows_exporter"
+    }
+    
+    if ($existingServices.Count -gt 0) {
+        Write-Host "   ⚠ Found existing services: $($existingServices -join ', ')" -ForegroundColor Yellow
+        $hasOldInstall = $true
+    }
+    
+    if ($hasOldInstall) {
+        Write-Host "   → Script will clean up and reinstall" -ForegroundColor Cyan
+    } else {
+        Write-Host "   ✓ No previous installations found" -ForegroundColor Green
+    }
+    
+    # 7. Check PowerShell version
+    Write-Host "7. Checking PowerShell version..." -ForegroundColor Yellow
+    $psVersion = $PSVersionTable.PSVersion
+    if ($psVersion.Major -ge 5) {
+        Write-Host "   ✓ PowerShell $($psVersion.Major).$($psVersion.Minor) is supported" -ForegroundColor Green
+    } else {
+        Write-Host "   ⚠ PowerShell $($psVersion.Major).$($psVersion.Minor) is old" -ForegroundColor Yellow
+        Write-Host "   PowerShell 5.1 or newer is recommended" -ForegroundColor Yellow
+    }
+    
+    Write-Host ""
+    
+    if (-not $allChecksPassed) {
+        Write-Host "✗ Pre-flight checks FAILED!" -ForegroundColor Red
+        Write-Host "Please fix the issues above before continuing." -ForegroundColor Yellow
+        Write-Host ""
+        return $false
+    }
+    
+    Write-Host "✓ All pre-flight checks passed!" -ForegroundColor Green
+    Write-Host ""
+    return $true
+}
+
+# Rollback function in case of failure
+function Invoke-Rollback {
+    param($Stage)
+    
+    Write-Host ""
+    Write-Host "=== Rollback: Cleaning up after failure ===" -ForegroundColor Yellow
+    Write-Host "Failed at stage: $Stage" -ForegroundColor Red
+    Write-Host ""
+    
+    # Stop and remove services
+    Write-Host "Stopping and removing services..." -ForegroundColor Yellow
+    Stop-Service -Name "windows_exporter" -Force -ErrorAction SilentlyContinue
+    Stop-Service -Name "otelcol" -Force -ErrorAction SilentlyContinue
+    
+    Start-Sleep -Seconds 2
+    
+    sc.exe delete "windows_exporter" 2>$null | Out-Null
+    sc.exe delete "otelcol" 2>$null | Out-Null
+    
+    # Kill processes
+    Get-Process | Where-Object {$_.ProcessName -like "*windows_exporter*" -or $_.ProcessName -like "*otelcol*"} | 
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    
+    # Remove directories (optional - commented out to preserve logs)
+    # Write-Host "Removing installation directories..." -ForegroundColor Yellow
+    # Remove-Item "C:\Program Files\OpenTelemetry Collector" -Recurse -Force -ErrorAction SilentlyContinue
+    # Remove-Item "C:\Program Files\Windows Exporter" -Recurse -Force -ErrorAction SilentlyContinue
+    
+    Write-Host ""
+    Write-Host "Rollback complete. Installation directories preserved for troubleshooting." -ForegroundColor Yellow
+    Write-Host "To manually clean up:" -ForegroundColor Cyan
+    Write-Host "  Remove-Item 'C:\Program Files\OpenTelemetry Collector' -Recurse -Force" -ForegroundColor Gray
+    Write-Host "  Remove-Item 'C:\Program Files\Windows Exporter' -Recurse -Force" -ForegroundColor Gray
+    Write-Host ""
+}
+
+
+
 # Function to download with retry
 function Download-WithRetry {
     param($Url, $OutputPath, $MaxRetries = 3)
@@ -77,6 +266,12 @@ function Download-WithRetry {
     }
     
     return $false
+}
+
+# Run pre-flight checks
+if (-not (Test-Prerequisites)) {
+    Write-Host "Exiting due to failed pre-flight checks." -ForegroundColor Red
+    exit 1
 }
 
 # Collect user information with validation
@@ -234,47 +429,159 @@ $ENABLED_COLLECTORS = "cpu,cs,logical_disk,net,os,system,memory,process,service"
 
 try {
     $installArgs = "/i `"$EXPORTER_PATH`" ENABLED_COLLECTORS=$ENABLED_COLLECTORS /quiet /norestart"
-    Start-Process msiexec.exe -ArgumentList $installArgs -Wait -NoNewWindow
-    Write-Host "✓ Windows Exporter installed!" -ForegroundColor Green
+    $process = Start-Process msiexec.exe -ArgumentList $installArgs -Wait -NoNewWindow -PassThru
+    
+    if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
+        Write-Host "  ⚠ MSI exit code: $($process.ExitCode)" -ForegroundColor Yellow
+    }
+    
+    Write-Host "✓ Windows Exporter MSI completed!" -ForegroundColor Green
 } catch {
     Write-Host "✗ Error installing Windows Exporter: $_" -ForegroundColor Red
     exit 1
 }
 
-# Wait for service creation
-Write-Host "Waiting for service creation..." -ForegroundColor Yellow
-Start-Sleep -Seconds 5
+# Verify installation
+Write-Host "Verifying installation..." -ForegroundColor Yellow
+Start-Sleep -Seconds 3
 
-# Verify and start service
+# Check if binary exists
+$exporterExe = "C:\Program Files\windows_exporter\windows_exporter.exe"
+if (-not (Test-Path $exporterExe)) {
+    Write-Host "✗ Windows Exporter binary not found at expected location!" -ForegroundColor Red
+    Write-Host "  Expected: $exporterExe" -ForegroundColor Yellow
+    exit 1
+}
+
+Write-Host "✓ Binary found: $exporterExe" -ForegroundColor Green
+
+# Test binary execution
+Write-Host "Testing binary..." -ForegroundColor Yellow
+try {
+    $testProcess = Start-Process -FilePath $exporterExe -ArgumentList "--version" -Wait -NoNewWindow -PassThru -RedirectStandardOutput "$env:TEMP\exporter_version.txt" -ErrorAction Stop
+    $version = Get-Content "$env:TEMP\exporter_version.txt" -ErrorAction SilentlyContinue
+    if ($version) {
+        Write-Host "✓ Binary is executable: $version" -ForegroundColor Green
+    }
+    Remove-Item "$env:TEMP\exporter_version.txt" -ErrorAction SilentlyContinue
+} catch {
+    Write-Host "  ⚠ Could not test binary version, continuing anyway..." -ForegroundColor Yellow
+}
+
+# Wait for MSI service creation
+Write-Host "Checking for service..." -ForegroundColor Yellow
+Start-Sleep -Seconds 2
+
+# Verify and configure service
 $exporterService = Get-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction SilentlyContinue
+
+if (-not $exporterService) {
+    Write-Host "  ⚠ MSI did not create service, creating manually..." -ForegroundColor Yellow
+    
+    # Create service manually with LocalSystem account
+    try {
+        sc.exe delete $EXPORTER_SERVICE_NAME 2>$null | Out-Null
+        
+        $result = sc.exe create $EXPORTER_SERVICE_NAME binPath= "`"$exporterExe`"" start= auto obj= "LocalSystem" DisplayName= "Windows Exporter"
+        
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "✓ Service created manually" -ForegroundColor Green
+            
+            # Set description
+            sc.exe description $EXPORTER_SERVICE_NAME "Prometheus Windows Exporter for metrics collection" | Out-Null
+            
+            # Configure failure recovery
+            sc.exe failure $EXPORTER_SERVICE_NAME reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
+        } else {
+            Write-Host "✗ Failed to create service manually" -ForegroundColor Red
+            exit 1
+        }
+        
+        # Refresh service object
+        Start-Sleep -Seconds 2
+        $exporterService = Get-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction SilentlyContinue
+    } catch {
+        Write-Host "✗ Error creating service: $_" -ForegroundColor Red
+        exit 1
+    }
+}
 
 if ($exporterService) {
     Write-Host "Starting Windows Exporter..." -ForegroundColor Green
-    Start-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 3
     
-    $exporterStatus = Get-Service -Name $EXPORTER_SERVICE_NAME
-    if ($exporterStatus.Status -eq "Running") {
-        Write-Host "✓ Windows Exporter running on port 9182!" -ForegroundColor Green
+    # Ensure service is configured for automatic start
+    Set-Service -Name $EXPORTER_SERVICE_NAME -StartupType Automatic -ErrorAction SilentlyContinue
+    
+    # Try to start service with retry
+    $maxAttempts = 3
+    $attempt = 0
+    $started = $false
+    
+    while ($attempt -lt $maxAttempts -and -not $started) {
+        $attempt++
+        Write-Host "  Attempt $attempt of $maxAttempts..." -ForegroundColor Cyan
         
-        # Test endpoint
         try {
-            $testResponse = Invoke-WebRequest -Uri "http://localhost:9182/metrics" -TimeoutSec 5 -UseBasicParsing
-            if ($testResponse.StatusCode -eq 200) {
-                Write-Host "✓ Endpoint responding correctly!" -ForegroundColor Green
+            Start-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction Stop
+            Start-Sleep -Seconds 3
+            
+            $exporterStatus = Get-Service -Name $EXPORTER_SERVICE_NAME
+            if ($exporterStatus.Status -eq "Running") {
+                $started = $true
+                Write-Host "✓ Windows Exporter is running!" -ForegroundColor Green
             }
         } catch {
-            Write-Host "⚠ Service running but endpoint not responding. Waiting for initialization..." -ForegroundColor Yellow
-            Start-Sleep -Seconds 5
+            Write-Host "  ⚠ Start attempt $attempt failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            if ($attempt -lt $maxAttempts) {
+                Start-Sleep -Seconds 2
+            }
         }
-    } else {
-        Write-Host "⚠ Windows Exporter installed but not running." -ForegroundColor Yellow
-        Write-Host "  Trying to start manually..." -ForegroundColor Yellow
-        Start-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 3
+    }
+    
+    if (-not $started) {
+        Write-Host "✗ Failed to start Windows Exporter after $maxAttempts attempts" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Troubleshooting:" -ForegroundColor Yellow
+        Write-Host "  1. Check Windows Event Viewer for errors" -ForegroundColor White
+        Write-Host "  2. Try running manually: cd 'C:\Program Files\windows_exporter'; .\windows_exporter.exe" -ForegroundColor White
+        Write-Host "  3. Check if another process is using port 9182: netstat -ano | findstr :9182" -ForegroundColor White
+        Write-Host ""
+        exit 1
+    }
+    
+    # Test endpoint
+    Write-Host "Testing endpoint..." -ForegroundColor Yellow
+    Start-Sleep -Seconds 2
+    
+    $maxEndpointAttempts = 5
+    $endpointAttempt = 0
+    $endpointWorking = $false
+    
+    while ($endpointAttempt -lt $maxEndpointAttempts -and -not $endpointWorking) {
+        $endpointAttempt++
+        try {
+            $response = Invoke-WebRequest -Uri "http://localhost:9182/metrics" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+            if ($response.StatusCode -eq 200 -and $response.Content -match "windows_") {
+                $endpointWorking = $true
+                Write-Host "✓ Endpoint responding correctly!" -ForegroundColor Green
+                $metricsCount = ([regex]::Matches($response.Content, "^windows_", [System.Text.RegularExpressions.RegexOptions]::Multiline)).Count
+                Write-Host "  → Exporting $metricsCount+ Windows metrics" -ForegroundColor Cyan
+            }
+        } catch {
+            if ($endpointAttempt -lt $maxEndpointAttempts) {
+                Write-Host "  ⚠ Endpoint not ready yet, waiting... (attempt $endpointAttempt/$maxEndpointAttempts)" -ForegroundColor Yellow
+                Start-Sleep -Seconds 3
+            }
+        }
+    }
+    
+    if (-not $endpointWorking) {
+        Write-Host "  ⚠ Service running but endpoint not responding on port 9182" -ForegroundColor Yellow
+        Write-Host "  Check firewall or try: curl http://localhost:9182/metrics" -ForegroundColor Yellow
     }
 } else {
-    Write-Host "⚠ Windows Exporter service was not created automatically." -ForegroundColor Yellow
+    Write-Host "✗ Could not find or create Windows Exporter service!" -ForegroundColor Red
+    exit 1
 }
 
 Write-Host ""
@@ -456,26 +763,53 @@ try {
     # Configure automatic recovery
     sc.exe failure $OTEL_SERVICE_NAME reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
     
-    # Start service
+    # Start service with retry logic
     Write-Host "Starting Collector..." -ForegroundColor Green
-    Start-Service -Name $OTEL_SERVICE_NAME -ErrorAction Stop
     
-    Start-Sleep -Seconds 3
+    $maxAttempts = 3
+    $attempt = 0
+    $started = $false
     
-    # Check status
-    $otelStatus = Get-Service -Name $OTEL_SERVICE_NAME
-    if ($otelStatus.Status -eq "Running") {
-        Write-Host "✓ OpenTelemetry Collector is running!" -ForegroundColor Green
-    } else {
-        Write-Host "⚠ Collector created but not running." -ForegroundColor Yellow
-        Write-Host "  Status: $($otelStatus.Status)" -ForegroundColor Yellow
+    while ($attempt -lt $maxAttempts -and -not $started) {
+        $attempt++
+        Write-Host "  Attempt $attempt of $maxAttempts..." -ForegroundColor Cyan
         
-        # Try to see error
-        Write-Host "  Checking logs..." -ForegroundColor Yellow
-        Start-Sleep -Seconds 2
-        Get-WinEvent -LogName Application -MaxEvents 5 -ErrorAction SilentlyContinue | 
+        try {
+            Start-Service -Name $OTEL_SERVICE_NAME -ErrorAction Stop
+            Start-Sleep -Seconds 4
+            
+            $otelStatus = Get-Service -Name $OTEL_SERVICE_NAME
+            if ($otelStatus.Status -eq "Running") {
+                $started = $true
+                Write-Host "✓ OpenTelemetry Collector is running!" -ForegroundColor Green
+            } else {
+                Write-Host "  ⚠ Service status: $($otelStatus.Status)" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "  ⚠ Start attempt $attempt failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            if ($attempt -lt $maxAttempts) {
+                Start-Sleep -Seconds 3
+            }
+        }
+    }
+    
+    if (-not $started) {
+        Write-Host "✗ Failed to start Collector after $maxAttempts attempts" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Checking logs..." -ForegroundColor Yellow
+        Get-WinEvent -LogName Application -MaxEvents 10 -ErrorAction SilentlyContinue | 
             Where-Object {$_.Message -like "*otelcol*"} | 
-            ForEach-Object { Write-Host "    $($_.Message)" -ForegroundColor Red }
+            ForEach-Object { 
+                Write-Host "  [$($_.TimeCreated)] $($_.LevelDisplayName): $($_.Message)" -ForegroundColor Red 
+            }
+        Write-Host ""
+        Write-Host "Troubleshooting:" -ForegroundColor Yellow
+        Write-Host "  1. Validate config: & '$EXE_PATH' validate --config='$CONFIG_FILE'" -ForegroundColor White
+        Write-Host "  2. Test manually: & '$EXE_PATH' --config='$CONFIG_FILE'" -ForegroundColor White
+        Write-Host "  3. Check config file: notepad '$CONFIG_FILE'" -ForegroundColor White
+        Write-Host ""
+        exit 1
+    }
     }
     
 } catch {
@@ -562,5 +896,33 @@ Write-Host "  - windows_os_*" -ForegroundColor Gray
 Write-Host "  - windows_system_*" -ForegroundColor Gray
 Write-Host "  - windows_service_*" -ForegroundColor Gray
 Write-Host "  - windows_process_*" -ForegroundColor Gray
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Troubleshooting:" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  If Windows Exporter won't start:" -ForegroundColor White
+Write-Host "    1. Check if port 9182 is free: netstat -ano | findstr :9182" -ForegroundColor Gray
+Write-Host "    2. Run manually to see errors:" -ForegroundColor Gray
+Write-Host "       cd 'C:\Program Files\windows_exporter'" -ForegroundColor Gray
+Write-Host "       .\windows_exporter.exe" -ForegroundColor Gray
+Write-Host "    3. Recreate service:" -ForegroundColor Gray
+Write-Host "       sc.exe delete windows_exporter" -ForegroundColor Gray
+Write-Host "       sc.exe create windows_exporter binPath= 'C:\Program Files\windows_exporter\windows_exporter.exe' start= auto obj= LocalSystem" -ForegroundColor Gray
+Write-Host "       Start-Service windows_exporter" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  If OpenTelemetry Collector won't start:" -ForegroundColor White
+Write-Host "    1. Validate config:" -ForegroundColor Gray
+Write-Host "       & 'C:\Program Files\OpenTelemetry Collector\otelcol-contrib.exe' validate --config='C:\Program Files\OpenTelemetry Collector\config.yaml'" -ForegroundColor Gray
+Write-Host "    2. Check event logs:" -ForegroundColor Gray
+Write-Host "       Get-WinEvent -LogName Application -MaxEvents 20 | Where {`$_.Message -like '*otelcol*'}" -ForegroundColor Gray
+Write-Host "    3. Test manually:" -ForegroundColor Gray
+Write-Host "       & 'C:\Program Files\OpenTelemetry Collector\otelcol-contrib.exe' --config='C:\Program Files\OpenTelemetry Collector\config.yaml'" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  Complete uninstall:" -ForegroundColor White
+Write-Host "    Stop-Service windows_exporter, otelcol -Force" -ForegroundColor Gray
+Write-Host "    sc.exe delete windows_exporter; sc.exe delete otelcol" -ForegroundColor Gray
+Write-Host "    Remove-Item 'C:\Program Files\OpenTelemetry Collector' -Recurse -Force" -ForegroundColor Gray
+Write-Host "    Remove-Item 'C:\Program Files\Windows Exporter' -Recurse -Force" -ForegroundColor Gray
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
