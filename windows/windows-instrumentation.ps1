@@ -12,8 +12,8 @@ Write-Host ""
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # Variables
-$OTEL_VERSION = "0.139.0"
-$WINDOWS_EXPORTER_VERSION = "0.31.3"
+$OTEL_VERSION = "0.114.0"
+$WINDOWS_EXPORTER_VERSION = "0.27.3"
 $INSTALL_DIR = "C:\Program Files\OpenTelemetry Collector"
 $EXPORTER_DIR = "C:\Program Files\Windows Exporter"
 $CONFIG_FILE = "$INSTALL_DIR\config.yaml"
@@ -684,7 +684,7 @@ processors:
   resource/add_labels:
     attributes:
       - action: insert
-        key: hostname
+        key: instance
         value: "$INSTANCE_NAME"
       - action: insert
         key: environment
@@ -809,7 +809,6 @@ try {
         Write-Host "  3. Check config file: notepad '$CONFIG_FILE'" -ForegroundColor White
         Write-Host ""
         exit 1
-    }
     }
     
 } catch {
