@@ -810,8 +810,9 @@ try {
         Write-Host ""
         exit 1
     }
-    
-} catch {
+}
+
+catch {
     Write-Host "✗ Error creating/starting Collector service: $_" -ForegroundColor Red
     Write-Host ""
     Write-Host "Debug - Config contents:" -ForegroundColor Yellow
