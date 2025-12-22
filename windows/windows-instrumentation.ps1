@@ -967,7 +967,7 @@ processors:
   resource/add_labels:
     attributes:
       - action: insert
-        key: instance
+        key: hostname
         value: "$INSTANCE_NAME"
       - action: insert
         key: environment
