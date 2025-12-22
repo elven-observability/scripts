@@ -547,133 +547,121 @@ Write-Host ""
 Write-Host "=== [1/2] Installing Windows Exporter ===" -ForegroundColor Green
 Write-Host ""
 
-# Stop existing service
-Stop-ServiceAndProcess -ServiceName $EXPORTER_SERVICE_NAME -ProcessPattern "windows_exporter"
-
 # Create directory
 New-Item -ItemType Directory -Force -Path $EXPORTER_DIR | Out-Null
 
-# Download Windows Exporter
-$EXPORTER_URL = "https://github.com/prometheus-community/windows_exporter/releases/download/v${WINDOWS_EXPORTER_VERSION}/windows_exporter-${WINDOWS_EXPORTER_VERSION}-amd64.msi"
-$EXPORTER_PATH = "$env:TEMP\windows_exporter.msi"
+# Download Windows Exporter - USE STANDALONE BINARY INSTEAD OF MSI
+# MSI has issues on some systems, so we download the .exe directly
+$EXPORTER_URL = "https://github.com/prometheus-community/windows_exporter/releases/download/v${WINDOWS_EXPORTER_VERSION}/windows_exporter-${WINDOWS_EXPORTER_VERSION}-amd64.exe"
+$EXPORTER_EXE = "$EXPORTER_DIR\windows_exporter.exe"
 
-Write-Host "Downloading Windows Exporter v$WINDOWS_EXPORTER_VERSION..." -ForegroundColor Green
+Write-Host "Downloading Windows Exporter v$WINDOWS_EXPORTER_VERSION (standalone binary)..." -ForegroundColor Green
+Write-Host "  Using direct .exe download (avoiding MSI issues)" -ForegroundColor Cyan
 
-if (-not (Download-WithRetry -Url $EXPORTER_URL -OutputPath $EXPORTER_PATH)) {
+if (-not (Download-WithRetry -Url $EXPORTER_URL -OutputPath $EXPORTER_EXE)) {
     Write-Host "✗ Failed to download Windows Exporter after multiple attempts." -ForegroundColor Red
     Exit-WithPause 1
 }
 
-# Install Windows Exporter
-Write-Host "Installing Windows Exporter..." -ForegroundColor Green
+# Verify download
+if (-not (Test-Path $EXPORTER_EXE)) {
+    Write-Host "✗ Downloaded file not found at $EXPORTER_EXE" -ForegroundColor Red
+    Exit-WithPause 1
+}
 
+$fileSize = (Get-Item $EXPORTER_EXE).Length / 1MB
+Write-Host "✓ Downloaded successfully ($([math]::Round($fileSize, 2)) MB)" -ForegroundColor Green
+
+# Verify it's a valid executable
+Write-Host "Verifying executable..." -ForegroundColor Yellow
 try {
-    # Install MSI WITHOUT parameters (like manual installation)
-    # Let the MSI do its job without interference
-    $installArgs = "/i `"$EXPORTER_PATH`" /quiet /norestart"
-    $process = Start-Process msiexec.exe -ArgumentList $installArgs -Wait -NoNewWindow -PassThru
+    $testProcess = Start-Process -FilePath $EXPORTER_EXE -ArgumentList "--version" -Wait -NoNewWindow -PassThru -RedirectStandardOutput "$env:TEMP\exporter_version.txt" -RedirectStandardError "$env:TEMP\exporter_error.txt" -ErrorAction Stop
     
-    if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) {
-        Write-Host "✓ Windows Exporter MSI installed successfully!" -ForegroundColor Green
+    if ($testProcess.ExitCode -eq 0) {
+        $version = Get-Content "$env:TEMP\exporter_version.txt" -ErrorAction SilentlyContinue
+        Write-Host "✓ Binary is valid: $version" -ForegroundColor Green
     } else {
-        Write-Host "  ⚠ MSI exit code: $($process.ExitCode)" -ForegroundColor Yellow
-        Write-Host "  Continuing anyway, will verify binary..." -ForegroundColor Yellow
+        Write-Host "  ⚠ Version check returned exit code: $($testProcess.ExitCode)" -ForegroundColor Yellow
+        $error = Get-Content "$env:TEMP\exporter_error.txt" -ErrorAction SilentlyContinue
+        if ($error) {
+            Write-Host "  Error: $error" -ForegroundColor Red
+        }
     }
-} catch {
-    Write-Host "✗ Error installing Windows Exporter: $_" -ForegroundColor Red
-    Exit-WithPause 1
-}
-
-# Verify installation
-Write-Host "Verifying installation..." -ForegroundColor Yellow
-
-# Give MSI time to complete all operations (service creation, registry, etc)
-Write-Host "  Waiting for MSI to complete all operations..." -ForegroundColor Cyan
-Start-Sleep -Seconds 8
-
-# Check if binary exists
-$exporterExe = "C:\Program Files\windows_exporter\windows_exporter.exe"
-if (-not (Test-Path $exporterExe)) {
-    Write-Host "✗ Windows Exporter binary not found at expected location!" -ForegroundColor Red
-    Write-Host "  Expected: $exporterExe" -ForegroundColor Yellow
-    Exit-WithPause 1
-}
-
-Write-Host "✓ Binary found: $exporterExe" -ForegroundColor Green
-
-# Test binary execution
-Write-Host "Testing binary..." -ForegroundColor Yellow
-try {
-    $testProcess = Start-Process -FilePath $exporterExe -ArgumentList "--version" -Wait -NoNewWindow -PassThru -RedirectStandardOutput "$env:TEMP\exporter_version.txt" -ErrorAction Stop
-    $version = Get-Content "$env:TEMP\exporter_version.txt" -ErrorAction SilentlyContinue
-    if ($version) {
-        Write-Host "✓ Binary is executable: $version" -ForegroundColor Green
-    }
+    
     Remove-Item "$env:TEMP\exporter_version.txt" -ErrorAction SilentlyContinue
+    Remove-Item "$env:TEMP\exporter_error.txt" -ErrorAction SilentlyContinue
 } catch {
-    Write-Host "  ⚠ Could not test binary version, continuing anyway..." -ForegroundColor Yellow
+    Write-Host "✗ Binary verification failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "  This may indicate the download is corrupted or blocked by antivirus." -ForegroundColor Yellow
+    Exit-WithPause 1
 }
 
-# Wait for MSI service creation
-Write-Host "Checking for service..." -ForegroundColor Yellow
+# Wait a moment for file system to stabilize
 Start-Sleep -Seconds 2
 
-# Verify and configure service
-$exporterService = Get-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction SilentlyContinue
 
-if (-not $exporterService) {
-    Write-Host "  ⚠ MSI did not create service, creating manually..." -ForegroundColor Yellow
+# Create Windows Exporter service manually
+# (Since we're using standalone binary, no MSI to create service)
+Write-Host "Creating Windows Exporter service..." -ForegroundColor Green
+
+$exporterExe = "$EXPORTER_DIR\windows_exporter.exe"
+
+# Remove any existing service first
+$existingSvc = sc.exe query $EXPORTER_SERVICE_NAME 2>$null
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "  → Removing existing service..." -ForegroundColor Yellow
+    sc.exe delete $EXPORTER_SERVICE_NAME | Out-Null
+    Start-Sleep -Seconds 3
+}
+
+Write-Host "  → Creating service with sc.exe..." -ForegroundColor Cyan
+$binPath = "`"$exporterExe`""
+$result = sc.exe create $EXPORTER_SERVICE_NAME binPath= $binPath start= auto obj= LocalSystem DisplayName= "Windows Exporter"
+
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "  ✓ Service created with sc.exe!" -ForegroundColor Green
     
-    # Create service manually with LocalSystem account (same as manual installation)
+    # Set description
+    sc.exe description $EXPORTER_SERVICE_NAME "Prometheus Windows Exporter for metrics collection" | Out-Null
+    
+    # Configure failure recovery (restart on failure)
+    sc.exe failure $EXPORTER_SERVICE_NAME reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
+    
+    Write-Host "  ✓ Service configured!" -ForegroundColor Green
+} else {
+    Write-Host "  ⚠ sc.exe failed, trying New-Service..." -ForegroundColor Yellow
+    
     try {
-        # Remove any existing service first
-        $existingSvc = sc.exe query $EXPORTER_SERVICE_NAME 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "  → Removing existing service..." -ForegroundColor Yellow
-            sc.exe delete $EXPORTER_SERVICE_NAME | Out-Null
-            Start-Sleep -Seconds 3
-        }
+        # Try with New-Service as fallback
+        New-Service -Name $EXPORTER_SERVICE_NAME `
+                   -BinaryPathName $binPath `
+                   -DisplayName "Windows Exporter" `
+                   -StartupType Automatic `
+                   -Description "Prometheus Windows Exporter for metrics collection" `
+                   -ErrorAction Stop
         
-        Write-Host "  → Creating service..." -ForegroundColor Yellow
-        $binPath = "`"$exporterExe`""
-        $result = sc.exe create $EXPORTER_SERVICE_NAME binPath= $binPath start= auto obj= LocalSystem DisplayName= "Windows Exporter"
-        
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "  ✓ Service created!" -ForegroundColor Green
-            
-            # Set description
-            sc.exe description $EXPORTER_SERVICE_NAME "Prometheus Windows Exporter for metrics collection" | Out-Null
-            
-            # Configure failure recovery (restart on failure)
-            sc.exe failure $EXPORTER_SERVICE_NAME reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
-            
-            Write-Host "  ✓ Service configured!" -ForegroundColor Green
-        } else {
-            Write-Host "  ✗ Failed to create service (exit code: $LASTEXITCODE)" -ForegroundColor Red
-            Write-Host "  Trying alternative method..." -ForegroundColor Yellow
-            
-            # Try with New-Service as fallback
-            New-Service -Name $EXPORTER_SERVICE_NAME `
-                       -BinaryPathName $binPath `
-                       -DisplayName "Windows Exporter" `
-                       -StartupType Automatic `
-                       -Description "Prometheus Windows Exporter for metrics collection" `
-                       -ErrorAction Stop
-            
-            Write-Host "  ✓ Service created with New-Service!" -ForegroundColor Green
-        }
-        
-        # Give Windows time to register the service
-        Start-Sleep -Seconds 5
-        $exporterService = Get-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction SilentlyContinue
-        
+        Write-Host "  ✓ Service created with New-Service!" -ForegroundColor Green
     } catch {
-        Write-Host "  ✗ Error creating service: $_" -ForegroundColor Red
+        Write-Host "  ✗ Failed to create service: $($_.Exception.Message)" -ForegroundColor Red
         Write-Host "" -ForegroundColor Red
         Write-Host "Manual creation command:" -ForegroundColor Yellow
         Write-Host "  sc.exe create $EXPORTER_SERVICE_NAME binPath= `"$exporterExe`" start= auto obj= LocalSystem" -ForegroundColor White
         Exit-WithPause 1
     }
+}
+
+# Give Windows time to register the service
+Start-Sleep -Seconds 3
+
+# Get service object
+$exporterService = Get-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction SilentlyContinue
+
+if (-not $exporterService) {
+    Write-Host "✗ Service was not created successfully!" -ForegroundColor Red
+    Write-Host "" -ForegroundColor Red
+    Write-Host "Please try creating manually:" -ForegroundColor Yellow
+    Write-Host "  sc.exe create $EXPORTER_SERVICE_NAME binPath= `"$exporterExe`" start= auto obj= LocalSystem" -ForegroundColor White
+    Exit-WithPause 1
 }
 
 if ($exporterService) {
@@ -1116,7 +1104,6 @@ try {
 
 # Clean up temporary files
 Remove-Item $OTEL_PATH -Force -ErrorAction SilentlyContinue
-Remove-Item $EXPORTER_PATH -Force -ErrorAction SilentlyContinue
 
 # Final summary
 Write-Host ""
