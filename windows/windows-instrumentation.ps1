@@ -33,6 +33,135 @@ $OTEL_SERVICE_NAME = "otelcol"
 $EXPORTER_SERVICE_NAME = "windows_exporter"
 $EXE_PATH = "$INSTALL_DIR\otelcol-contrib.exe"
 
+# ============================================================================
+# CLEANUP - Remove all previous installations to avoid conflicts
+# ============================================================================
+Write-Host "=== Pre-Installation Cleanup ===" -ForegroundColor Yellow
+Write-Host "Removing any previous installations to ensure clean setup..." -ForegroundColor Yellow
+Write-Host ""
+
+# 1. Stop and delete services
+Write-Host "[1/6] Stopping and removing services..." -ForegroundColor Cyan
+try {
+    # Stop services first
+    $services = @($EXPORTER_SERVICE_NAME, $OTEL_SERVICE_NAME)
+    foreach ($svcName in $services) {
+        $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+        if ($svc) {
+            if ($svc.Status -eq "Running") {
+                Write-Host "  → Stopping $svcName..." -ForegroundColor Gray
+                Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 2
+            }
+            # Delete service
+            Write-Host "  → Deleting $svcName service..." -ForegroundColor Gray
+            sc.exe delete $svcName 2>$null | Out-Null
+            Start-Sleep -Seconds 1
+        }
+    }
+    Write-Host "  ✓ Services cleaned" -ForegroundColor Green
+} catch {
+    Write-Host "  ⚠ Could not fully clean services (continuing anyway)" -ForegroundColor Yellow
+}
+
+# 2. Kill any running processes
+Write-Host "[2/6] Terminating processes..." -ForegroundColor Cyan
+try {
+    $processes = @("windows_exporter", "otelcol", "otelcol-contrib")
+    foreach ($procName in $processes) {
+        $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
+        if ($procs) {
+            Write-Host "  → Killing $procName process(es)..." -ForegroundColor Gray
+            $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Start-Sleep -Seconds 2
+    Write-Host "  ✓ Processes terminated" -ForegroundColor Green
+} catch {
+    Write-Host "  ⚠ Could not kill all processes (continuing anyway)" -ForegroundColor Yellow
+}
+
+# 3. Free port 9182
+Write-Host "[3/6] Freeing port 9182..." -ForegroundColor Cyan
+try {
+    $connections = Get-NetTCPConnection -LocalPort 9182 -ErrorAction SilentlyContinue
+    if ($connections) {
+        foreach ($conn in $connections) {
+            Write-Host "  → Killing process using port 9182 (PID: $($conn.OwningProcess))..." -ForegroundColor Gray
+            Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Seconds 3
+        Write-Host "  ✓ Port 9182 freed" -ForegroundColor Green
+    } else {
+        Write-Host "  ✓ Port 9182 already free" -ForegroundColor Green
+    }
+} catch {
+    Write-Host "  ⚠ Could not check port (continuing anyway)" -ForegroundColor Yellow
+}
+
+# 4. Remove installation directories
+Write-Host "[4/6] Removing old directories..." -ForegroundColor Cyan
+$directoriesToRemove = @(
+    "C:\Program Files\windows_exporter",
+    "C:\Program Files\Windows Exporter",
+    "C:\Program Files\OpenTelemetry Collector",
+    "C:\Program Files\otelcol",
+    $EXPORTER_DIR,
+    $INSTALL_DIR
+)
+
+$removed = 0
+foreach ($dir in $directoriesToRemove) {
+    if (Test-Path $dir) {
+        try {
+            Write-Host "  → Removing: $dir" -ForegroundColor Gray
+            Remove-Item $dir -Recurse -Force -ErrorAction Stop
+            $removed++
+        } catch {
+            Write-Host "  ⚠ Could not remove: $dir" -ForegroundColor Yellow
+            # Try with cmd
+            try {
+                cmd /c "rmdir /s /q `"$dir`"" 2>$null
+            } catch {}
+        }
+    }
+}
+if ($removed -gt 0) {
+    Write-Host "  ✓ Removed $removed director(ies)" -ForegroundColor Green
+} else {
+    Write-Host "  ✓ No old directories found" -ForegroundColor Green
+}
+
+# 5. Clean temporary files
+Write-Host "[5/6] Cleaning temporary files..." -ForegroundColor Cyan
+$tempFiles = @(
+    "$env:TEMP\windows_exporter*.msi",
+    "$env:TEMP\otelcol*.tar.gz",
+    "$env:TEMP\otelcol*.zip",
+    "C:\temp\windows_exporter*.msi",
+    "C:\temp\otelcol*.tar.gz"
+)
+
+foreach ($pattern in $tempFiles) {
+    try {
+        Remove-Item $pattern -Force -ErrorAction SilentlyContinue
+    } catch {}
+}
+Write-Host "  ✓ Temporary files cleaned" -ForegroundColor Green
+
+# 6. Wait for Windows to fully release resources
+Write-Host "[6/6] Waiting for Windows to release all resources..." -ForegroundColor Cyan
+Start-Sleep -Seconds 5
+Write-Host "  ✓ System ready for clean installation!" -ForegroundColor Green
+
+Write-Host ""
+Write-Host "=== Cleanup Complete - Starting Fresh Installation ===" -ForegroundColor Green
+Write-Host ""
+Write-Host ""
+
+# ============================================================================
+
+
 # Function to stop services and processes
 function Stop-ServiceAndProcess {
     param($ServiceName, $ProcessPattern)
