@@ -437,17 +437,19 @@ if (-not (Download-WithRetry -Url $EXPORTER_URL -OutputPath $EXPORTER_PATH)) {
 
 # Install Windows Exporter
 Write-Host "Installing Windows Exporter..." -ForegroundColor Green
-$ENABLED_COLLECTORS = "cpu,cs,logical_disk,net,os,system,memory,process,service"
 
 try {
-    $installArgs = "/i `"$EXPORTER_PATH`" ENABLED_COLLECTORS=$ENABLED_COLLECTORS /quiet /norestart"
+    # Install MSI WITHOUT parameters (like manual installation)
+    # Let the MSI do its job without interference
+    $installArgs = "/i `"$EXPORTER_PATH`" /quiet /norestart"
     $process = Start-Process msiexec.exe -ArgumentList $installArgs -Wait -NoNewWindow -PassThru
     
-    if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
+    if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) {
+        Write-Host "✓ Windows Exporter MSI installed successfully!" -ForegroundColor Green
+    } else {
         Write-Host "  ⚠ MSI exit code: $($process.ExitCode)" -ForegroundColor Yellow
+        Write-Host "  Continuing anyway, will verify binary..." -ForegroundColor Yellow
     }
-    
-    Write-Host "✓ Windows Exporter MSI completed!" -ForegroundColor Green
 } catch {
     Write-Host "✗ Error installing Windows Exporter: $_" -ForegroundColor Red
     Exit-WithPause 1
@@ -455,7 +457,10 @@ try {
 
 # Verify installation
 Write-Host "Verifying installation..." -ForegroundColor Yellow
-Start-Sleep -Seconds 3
+
+# Give MSI time to complete all operations (service creation, registry, etc)
+Write-Host "  Waiting for MSI to complete all operations..." -ForegroundColor Cyan
+Start-Sleep -Seconds 8
 
 # Check if binary exists
 $exporterExe = "C:\Program Files\windows_exporter\windows_exporter.exe"
@@ -490,39 +495,96 @@ $exporterService = Get-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction Silentl
 if (-not $exporterService) {
     Write-Host "  ⚠ MSI did not create service, creating manually..." -ForegroundColor Yellow
     
-    # Create service manually with LocalSystem account
+    # Create service manually with LocalSystem account (same as manual installation)
     try {
-        sc.exe delete $EXPORTER_SERVICE_NAME 2>$null | Out-Null
+        # Remove any existing service first
+        $existingSvc = sc.exe query $EXPORTER_SERVICE_NAME 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  → Removing existing service..." -ForegroundColor Yellow
+            sc.exe delete $EXPORTER_SERVICE_NAME | Out-Null
+            Start-Sleep -Seconds 3
+        }
         
-        $result = sc.exe create $EXPORTER_SERVICE_NAME binPath= "`"$exporterExe`"" start= auto obj= "LocalSystem" DisplayName= "Windows Exporter"
+        Write-Host "  → Creating service..." -ForegroundColor Yellow
+        $binPath = "`"$exporterExe`""
+        $result = sc.exe create $EXPORTER_SERVICE_NAME binPath= $binPath start= auto obj= LocalSystem DisplayName= "Windows Exporter"
         
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "✓ Service created manually" -ForegroundColor Green
+            Write-Host "  ✓ Service created!" -ForegroundColor Green
             
             # Set description
             sc.exe description $EXPORTER_SERVICE_NAME "Prometheus Windows Exporter for metrics collection" | Out-Null
             
-            # Configure failure recovery
+            # Configure failure recovery (restart on failure)
             sc.exe failure $EXPORTER_SERVICE_NAME reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
+            
+            Write-Host "  ✓ Service configured!" -ForegroundColor Green
         } else {
-            Write-Host "✗ Failed to create service manually" -ForegroundColor Red
-            Exit-WithPause 1
+            Write-Host "  ✗ Failed to create service (exit code: $LASTEXITCODE)" -ForegroundColor Red
+            Write-Host "  Trying alternative method..." -ForegroundColor Yellow
+            
+            # Try with New-Service as fallback
+            New-Service -Name $EXPORTER_SERVICE_NAME `
+                       -BinaryPathName $binPath `
+                       -DisplayName "Windows Exporter" `
+                       -StartupType Automatic `
+                       -Description "Prometheus Windows Exporter for metrics collection" `
+                       -ErrorAction Stop
+            
+            Write-Host "  ✓ Service created with New-Service!" -ForegroundColor Green
         }
         
-        # Refresh service object
-        Start-Sleep -Seconds 2
+        # Give Windows time to register the service
+        Start-Sleep -Seconds 5
         $exporterService = Get-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction SilentlyContinue
+        
     } catch {
-        Write-Host "✗ Error creating service: $_" -ForegroundColor Red
+        Write-Host "  ✗ Error creating service: $_" -ForegroundColor Red
+        Write-Host "" -ForegroundColor Red
+        Write-Host "Manual creation command:" -ForegroundColor Yellow
+        Write-Host "  sc.exe create $EXPORTER_SERVICE_NAME binPath= `"$exporterExe`" start= auto obj= LocalSystem" -ForegroundColor White
         Exit-WithPause 1
     }
 }
 
 if ($exporterService) {
+    # Show service details before starting
+    Write-Host "Service details:" -ForegroundColor Cyan
+    $svcInfo = Get-Service -Name $EXPORTER_SERVICE_NAME | Select-Object Name, Status, StartType
+    Write-Host "  Name: $($svcInfo.Name)" -ForegroundColor White
+    Write-Host "  Status: $($svcInfo.Status)" -ForegroundColor White
+    Write-Host "  StartType: $($svcInfo.StartType)" -ForegroundColor White
+    Write-Host ""
+    
+    # Test if executable can run before trying service
+    Write-Host "Testing if binary can execute..." -ForegroundColor Yellow
+    try {
+        $testProc = Start-Process -FilePath $exporterExe -ArgumentList "--version" -Wait -NoNewWindow -PassThru -RedirectStandardOutput "$env:TEMP\we_test.txt" -RedirectStandardError "$env:TEMP\we_error.txt"
+        if ($testProc.ExitCode -eq 0) {
+            Write-Host "  ✓ Binary can execute successfully!" -ForegroundColor Green
+        } else {
+            Write-Host "  ⚠ Binary test returned exit code: $($testProc.ExitCode)" -ForegroundColor Yellow
+            $errorContent = Get-Content "$env:TEMP\we_error.txt" -ErrorAction SilentlyContinue
+            if ($errorContent) {
+                Write-Host "  Error: $errorContent" -ForegroundColor Red
+            }
+        }
+        Remove-Item "$env:TEMP\we_test.txt" -ErrorAction SilentlyContinue
+        Remove-Item "$env:TEMP\we_error.txt" -ErrorAction SilentlyContinue
+    } catch {
+        Write-Host "  ⚠ Could not test binary: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+    Write-Host ""
+    
     Write-Host "Starting Windows Exporter..." -ForegroundColor Green
     
     # Ensure service is configured for automatic start
-    Set-Service -Name $EXPORTER_SERVICE_NAME -StartupType Automatic -ErrorAction SilentlyContinue
+    try {
+        Set-Service -Name $EXPORTER_SERVICE_NAME -StartupType Automatic -ErrorAction Stop
+        Write-Host "  ✓ Service set to Automatic startup" -ForegroundColor Green
+    } catch {
+        Write-Host "  ⚠ Could not set startup type: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
     
     # Try to start service with retry
     $maxAttempts = 3
@@ -535,30 +597,122 @@ if ($exporterService) {
         
         try {
             Start-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction Stop
-            Start-Sleep -Seconds 3
+            Start-Sleep -Seconds 5  # Increased wait time
             
             $exporterStatus = Get-Service -Name $EXPORTER_SERVICE_NAME
+            Write-Host "    Service status after start: $($exporterStatus.Status)" -ForegroundColor Cyan
+            
             if ($exporterStatus.Status -eq "Running") {
                 $started = $true
-                Write-Host "✓ Windows Exporter is running!" -ForegroundColor Green
+                Write-Host "  ✓ Windows Exporter is running!" -ForegroundColor Green
+            } else {
+                Write-Host "    ⚠ Service status is: $($exporterStatus.Status)" -ForegroundColor Yellow
             }
         } catch {
-            Write-Host "  ⚠ Start attempt $attempt failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            $errorMsg = $_.Exception.Message
+            Write-Host "    ✗ Start attempt $attempt failed!" -ForegroundColor Red
+            Write-Host "    Error: $errorMsg" -ForegroundColor Red
+            
+            # Check Windows Event Log for specific error
+            try {
+                $recentErrors = Get-WinEvent -LogName System -MaxEvents 5 -ErrorAction SilentlyContinue | 
+                    Where-Object {$_.TimeCreated -gt (Get-Date).AddMinutes(-2) -and $_.Message -like "*$EXPORTER_SERVICE_NAME*"}
+                
+                if ($recentErrors) {
+                    Write-Host "    Recent Windows errors:" -ForegroundColor Yellow
+                    foreach ($err in $recentErrors) {
+                        Write-Host "      [$($err.LevelDisplayName)] $($err.Message.Substring(0, [Math]::Min(150, $err.Message.Length)))" -ForegroundColor Red
+                    }
+                }
+            } catch {
+                # Ignore event log errors
+            }
+            
             if ($attempt -lt $maxAttempts) {
-                Start-Sleep -Seconds 2
+                Write-Host "    → Waiting 5 seconds before retry..." -ForegroundColor Cyan
+                Start-Sleep -Seconds 5
             }
         }
     }
     
     if (-not $started) {
-        Write-Host "✗ Failed to start Windows Exporter after $maxAttempts attempts" -ForegroundColor Red
         Write-Host ""
-        Write-Host "Troubleshooting:" -ForegroundColor Yellow
-        Write-Host "  1. Check Windows Event Viewer for errors" -ForegroundColor White
-        Write-Host "  2. Try running manually: cd 'C:\Program Files\windows_exporter'; .\windows_exporter.exe" -ForegroundColor White
-        Write-Host "  3. Check if another process is using port 9182: netstat -ano | findstr :9182" -ForegroundColor White
+        Write-Host "⚠ Service failed to start. Trying alternative: run as background process..." -ForegroundColor Yellow
         Write-Host ""
-        Exit-WithPause 1
+        
+        try {
+            # Try to run as a background process instead of service
+            $processStarted = $false
+            
+            # Kill any existing process first
+            Get-Process -Name "windows_exporter" -ErrorAction SilentlyContinue | Stop-Process -Force
+            Start-Sleep -Seconds 2
+            
+            Write-Host "  Starting Windows Exporter as background process..." -ForegroundColor Cyan
+            Start-Process -FilePath $exporterExe -WindowStyle Hidden -ErrorAction Stop
+            Start-Sleep -Seconds 5
+            
+            # Check if process is running
+            $exporterProcess = Get-Process -Name "windows_exporter" -ErrorAction SilentlyContinue
+            if ($exporterProcess) {
+                Write-Host "  ✓ Windows Exporter running as process (PID: $($exporterProcess.Id))" -ForegroundColor Green
+                
+                # Test endpoint
+                Start-Sleep -Seconds 3
+                try {
+                    $response = Invoke-WebRequest -Uri "http://localhost:9182/metrics" -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+                    if ($response.StatusCode -eq 200) {
+                        Write-Host "  ✓ Endpoint responding correctly!" -ForegroundColor Green
+                        $processStarted = $true
+                        
+                        Write-Host ""
+                        Write-Host "⚠ NOTE: Running as process instead of service!" -ForegroundColor Yellow
+                        Write-Host "  This means it will stop if you log out or restart the server." -ForegroundColor Yellow
+                        Write-Host "  To fix the service issue, follow the troubleshooting steps above." -ForegroundColor Yellow
+                        Write-Host ""
+                    }
+                } catch {
+                    Write-Host "  ⚠ Process started but endpoint not responding" -ForegroundColor Yellow
+                }
+            }
+            
+            if (-not $processStarted) {
+                Write-Host ""
+                Write-Host "✗ Both service and process methods failed!" -ForegroundColor Red
+                Write-Host ""
+                Write-Host "=== TROUBLESHOOTING STEPS ===" -ForegroundColor Yellow
+                Write-Host ""
+                Write-Host "1. Check if port 9182 is free:" -ForegroundColor Cyan
+                Write-Host "   netstat -ano | findstr :9182" -ForegroundColor White
+                Write-Host ""
+                Write-Host "2. Try running the binary manually:" -ForegroundColor Cyan
+                Write-Host "   cd 'C:\Program Files\windows_exporter'" -ForegroundColor White
+                Write-Host "   .\windows_exporter.exe" -ForegroundColor White
+                Write-Host "   (Press Ctrl+C to stop after testing)" -ForegroundColor Gray
+                Write-Host ""
+                Write-Host "3. Check Windows Event Viewer:" -ForegroundColor Cyan
+                Write-Host "   Get-WinEvent -LogName System -MaxEvents 20 | Where-Object {`$_.Message -like '*windows_exporter*'}" -ForegroundColor White
+                Write-Host ""
+                Write-Host "4. Try recreating the service:" -ForegroundColor Cyan
+                Write-Host "   sc.exe delete windows_exporter" -ForegroundColor White
+                Write-Host "   sc.exe create windows_exporter binPath= 'C:\Program Files\windows_exporter\windows_exporter.exe' start= auto obj= LocalSystem" -ForegroundColor White
+                Write-Host "   Start-Service windows_exporter" -ForegroundColor White
+                Write-Host ""
+                Write-Host "5. Check service configuration:" -ForegroundColor Cyan
+                Write-Host "   sc.exe qc windows_exporter" -ForegroundColor White
+                Write-Host ""
+                Exit-WithPause 1
+            }
+        } catch {
+            Write-Host "  ✗ Failed to start as process: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host ""
+            Write-Host "=== MANUAL STEPS REQUIRED ===" -ForegroundColor Yellow
+            Write-Host "Please try running manually:" -ForegroundColor Yellow
+            Write-Host "  cd 'C:\Program Files\windows_exporter'" -ForegroundColor White
+            Write-Host "  .\windows_exporter.exe" -ForegroundColor White
+            Write-Host ""
+            Exit-WithPause 1
+        }
     }
     
     # Test endpoint
