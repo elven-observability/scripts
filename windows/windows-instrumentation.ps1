@@ -316,14 +316,31 @@ function Test-Prerequisites {
         Write-Host "   ✓ No previous installations found" -ForegroundColor Green
     }
     
-    # 7. Check PowerShell version
+    # 7. Check PowerShell version and extraction method
     Write-Host "7. Checking PowerShell version..." -ForegroundColor Yellow
     $psVersion = $PSVersionTable.PSVersion
+    $hasTar = $null -ne (Get-Command tar -ErrorAction SilentlyContinue)
+    
     if ($psVersion.Major -ge 5) {
         Write-Host "   ✓ PowerShell $($psVersion.Major).$($psVersion.Minor) is supported" -ForegroundColor Green
+    } elseif ($psVersion.Major -eq 4) {
+        Write-Host "   ⚠ PowerShell $($psVersion.Major).$($psVersion.Minor) (legacy system)" -ForegroundColor Yellow
+        Write-Host "   Script will use compatibility mode" -ForegroundColor Cyan
     } else {
-        Write-Host "   ⚠ PowerShell $($psVersion.Major).$($psVersion.Minor) is old" -ForegroundColor Yellow
-        Write-Host "   PowerShell 5.1 or newer is recommended" -ForegroundColor Yellow
+        Write-Host "   ✗ PowerShell $($psVersion.Major).$($psVersion.Minor) is too old!" -ForegroundColor Red
+        Write-Host "   PowerShell 4.0 or newer is required" -ForegroundColor Yellow
+        $allChecksPassed = $false
+    }
+    
+    # Show extraction method that will be used
+    if ($hasTar) {
+        Write-Host "   → Will use tar for extraction (modern system)" -ForegroundColor Cyan
+    } else {
+        if ($psVersion.Major -ge 5) {
+            Write-Host "   → Will use Expand-Archive for extraction (PowerShell 5+)" -ForegroundColor Cyan
+        } elseif ($psVersion.Major -eq 4) {
+            Write-Host "   → Will use .NET for extraction (PowerShell 4 / Server 2012 R2)" -ForegroundColor Cyan
+        }
     }
     
     Write-Host ""
@@ -889,24 +906,74 @@ if (Test-Path $EXE_PATH) {
 }
 
 # Download Collector
-$OTEL_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/otelcol-contrib_${OTEL_VERSION}_windows_amd64.tar.gz"
-$OTEL_PATH = "$env:TEMP\otelcol.tar.gz"
-
 Write-Host "Downloading OpenTelemetry Collector v$OTEL_VERSION..." -ForegroundColor Green
+
+# Check if tar is available (only in Windows 10 1803+ and Server 2019+)
+$hasTar = $null -ne (Get-Command tar -ErrorAction SilentlyContinue)
+
+if ($hasTar) {
+    # Use tar.gz for modern systems
+    Write-Host "  Using tar.gz format (tar available)" -ForegroundColor Cyan
+    $OTEL_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/otelcol-contrib_${OTEL_VERSION}_windows_amd64.tar.gz"
+    $OTEL_PATH = "$env:TEMP\otelcol.tar.gz"
+} else {
+    # Use zip for older systems (2012 R2, 2016)
+    Write-Host "  Using zip format (tar not available - legacy system)" -ForegroundColor Cyan
+    $OTEL_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/otelcol-contrib_${OTEL_VERSION}_windows_amd64.zip"
+    $OTEL_PATH = "$env:TEMP\otelcol.zip"
+}
 
 if (-not (Download-WithRetry -Url $OTEL_URL -OutputPath $OTEL_PATH)) {
     Write-Host "✗ Failed to download Collector after multiple attempts." -ForegroundColor Red
     Exit-WithPause 1
 }
 
-# Extract
+# Extract with appropriate method
 Write-Host "Extracting files..." -ForegroundColor Green
-try {
-    tar -xzf $OTEL_PATH -C $INSTALL_DIR 2>&1 | Out-Null
-    Write-Host "✓ Extraction complete!" -ForegroundColor Green
-} catch {
-    Write-Host "⚠ Error during extraction (may be normal if file already existed): $_" -ForegroundColor Yellow
+
+if ($hasTar) {
+    # Modern systems: use tar
+    try {
+        Write-Host "  Using tar to extract..." -ForegroundColor Cyan
+        $tarOutput = tar -xzf $OTEL_PATH -C $INSTALL_DIR 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "✓ Extraction complete!" -ForegroundColor Green
+        } else {
+            Write-Host "  ⚠ tar exit code: $LASTEXITCODE" -ForegroundColor Yellow
+            Write-Host "  Output: $tarOutput" -ForegroundColor Gray
+        }
+    } catch {
+        Write-Host "  ⚠ Error during tar extraction: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+} else {
+    # Legacy systems: use PowerShell native extraction
+    try {
+        Write-Host "  Using PowerShell to extract (legacy system)..." -ForegroundColor Cyan
+        
+        # PowerShell 5.0+ has Expand-Archive
+        if ($PSVersionTable.PSVersion.Major -ge 5) {
+            Expand-Archive -Path $OTEL_PATH -DestinationPath $INSTALL_DIR -Force
+            Write-Host "✓ Extraction complete with Expand-Archive!" -ForegroundColor Green
+        } else {
+            # PowerShell 4.0 (2012 R2): use .NET
+            Write-Host "  Using .NET to extract (PowerShell 4.0)..." -ForegroundColor Cyan
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($OTEL_PATH, $INSTALL_DIR)
+            Write-Host "✓ Extraction complete with .NET!" -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "✗ Error during extraction: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "" -ForegroundColor Red
+        Write-Host "Manual extraction required:" -ForegroundColor Yellow
+        Write-Host "  1. Download: $OTEL_URL" -ForegroundColor White
+        Write-Host "  2. Extract to: $INSTALL_DIR" -ForegroundColor White
+        Write-Host "  3. Ensure file exists: $EXE_PATH" -ForegroundColor White
+        Exit-WithPause 1
+    }
 }
+
+# Wait for file system to catch up
+Start-Sleep -Seconds 2
 
 # Verify executable was extracted
 if (-not (Test-Path $EXE_PATH)) {
