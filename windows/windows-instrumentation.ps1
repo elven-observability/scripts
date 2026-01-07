@@ -908,23 +908,27 @@ if (Test-Path $EXE_PATH) {
 # Download Collector
 Write-Host "Downloading OpenTelemetry Collector v$OTEL_VERSION..." -ForegroundColor Green
 
-# Check if tar is available (only in Windows 10 1803+ and Server 2019+)
+# OpenTelemetry only provides .tar.gz for all platforms including Windows
+$OTEL_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/otelcol-contrib_${OTEL_VERSION}_windows_amd64.tar.gz"
+$OTEL_PATH = "$env:TEMP\otelcol.tar.gz"
+
+# Check if tar command is available (Windows 10 1803+ / Server 2019+)
 $hasTar = $null -ne (Get-Command tar -ErrorAction SilentlyContinue)
 
 if ($hasTar) {
-    # Use tar.gz for modern systems
-    Write-Host "  Using tar.gz format (tar available)" -ForegroundColor Cyan
-    $OTEL_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/otelcol-contrib_${OTEL_VERSION}_windows_amd64.tar.gz"
-    $OTEL_PATH = "$env:TEMP\otelcol.tar.gz"
+    Write-Host "  Using tar command for extraction" -ForegroundColor Cyan
 } else {
-    # Use zip for older systems (2012 R2, 2016)
-    Write-Host "  Using zip format (tar not available - legacy system)" -ForegroundColor Cyan
-    $OTEL_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/otelcol-contrib_${OTEL_VERSION}_windows_amd64.zip"
-    $OTEL_PATH = "$env:TEMP\otelcol.zip"
+    Write-Host "  Using PowerShell-based extraction (legacy system)" -ForegroundColor Cyan
 }
 
 if (-not (Download-WithRetry -Url $OTEL_URL -OutputPath $OTEL_PATH)) {
     Write-Host "✗ Failed to download Collector after multiple attempts." -ForegroundColor Red
+    Write-Host "  URL tried: $OTEL_URL" -ForegroundColor Yellow
+    Write-Host "" -ForegroundColor Red
+    Write-Host "Troubleshooting:" -ForegroundColor Yellow
+    Write-Host "  1. Verify the version exists: https://github.com/open-telemetry/opentelemetry-collector-releases/releases/tag/v$OTEL_VERSION" -ForegroundColor White
+    Write-Host "  2. Check internet connection" -ForegroundColor White
+    Write-Host "  3. Try downloading manually and place in: $INSTALL_DIR" -ForegroundColor White
     Exit-WithPause 1
 }
 
@@ -932,12 +936,12 @@ if (-not (Download-WithRetry -Url $OTEL_URL -OutputPath $OTEL_PATH)) {
 Write-Host "Extracting files..." -ForegroundColor Green
 
 if ($hasTar) {
-    # Modern systems: use tar
+    # Modern systems: use native tar command
     try {
-        Write-Host "  Using tar to extract..." -ForegroundColor Cyan
+        Write-Host "  Using native tar command..." -ForegroundColor Cyan
         $tarOutput = tar -xzf $OTEL_PATH -C $INSTALL_DIR 2>&1
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "✓ Extraction complete!" -ForegroundColor Green
+            Write-Host "✓ Extraction complete with tar!" -ForegroundColor Green
         } else {
             Write-Host "  ⚠ tar exit code: $LASTEXITCODE" -ForegroundColor Yellow
             Write-Host "  Output: $tarOutput" -ForegroundColor Gray
@@ -946,28 +950,102 @@ if ($hasTar) {
         Write-Host "  ⚠ Error during tar extraction: $($_.Exception.Message)" -ForegroundColor Yellow
     }
 } else {
-    # Legacy systems: use PowerShell native extraction
+    # Legacy systems (2012 R2, 2016): extract .tar.gz using PowerShell
+    # This is a two-step process: first decompress gzip, then extract tar
     try {
-        Write-Host "  Using PowerShell to extract (legacy system)..." -ForegroundColor Cyan
+        Write-Host "  Using PowerShell to extract .tar.gz (legacy system)..." -ForegroundColor Cyan
         
-        # PowerShell 5.0+ has Expand-Archive
-        if ($PSVersionTable.PSVersion.Major -ge 5) {
-            Expand-Archive -Path $OTEL_PATH -DestinationPath $INSTALL_DIR -Force
-            Write-Host "✓ Extraction complete with Expand-Archive!" -ForegroundColor Green
-        } else {
-            # PowerShell 4.0 (2012 R2): use .NET
-            Write-Host "  Using .NET to extract (PowerShell 4.0)..." -ForegroundColor Cyan
-            Add-Type -AssemblyName System.IO.Compression.FileSystem
-            [System.IO.Compression.ZipFile]::ExtractToDirectory($OTEL_PATH, $INSTALL_DIR)
-            Write-Host "✓ Extraction complete with .NET!" -ForegroundColor Green
+        # Step 1: Decompress .gz to .tar using .NET
+        Write-Host "    → Decompressing .gz..." -ForegroundColor Gray
+        $tarPath = "$env:TEMP\otelcol.tar"
+        
+        Add-Type -AssemblyName System.IO.Compression
+        $gzipStream = New-Object System.IO.FileStream($OTEL_PATH, [System.IO.FileMode]::Open)
+        $gzStream = New-Object System.IO.Compression.GZipStream($gzipStream, [System.IO.Compression.CompressionMode]::Decompress)
+        $tarStream = New-Object System.IO.FileStream($tarPath, [System.IO.FileMode]::Create)
+        
+        $gzStream.CopyTo($tarStream)
+        
+        $tarStream.Close()
+        $gzStream.Close()
+        $gzipStream.Close()
+        
+        Write-Host "    ✓ Decompressed to .tar" -ForegroundColor Green
+        
+        # Step 2: Extract .tar using PowerShell tar reader
+        Write-Host "    → Extracting .tar archive..." -ForegroundColor Gray
+        
+        # Simple tar extraction for Windows executables (they're usually at root of tar)
+        # Read tar file manually since PowerShell 4.0 doesn't have native tar support
+        $tarBytes = [System.IO.File]::ReadAllBytes($tarPath)
+        $position = 0
+        $extractedFiles = 0
+        
+        while ($position -lt $tarBytes.Length - 512) {
+            # Read tar header (512 bytes)
+            $header = $tarBytes[$position..($position + 511)]
+            
+            # Get filename (first 100 bytes, null-terminated)
+            $nameBytes = $header[0..99]
+            $nameEndIndex = [Array]::IndexOf($nameBytes, 0)
+            if ($nameEndIndex -lt 0) { $nameEndIndex = 100 }
+            $fileName = [System.Text.Encoding]::ASCII.GetString($nameBytes, 0, $nameEndIndex).Trim()
+            
+            # Skip if empty header (end of archive)
+            if ([string]::IsNullOrEmpty($fileName)) {
+                break
+            }
+            
+            # Get file size (bytes 124-135, octal)
+            $sizeBytes = $header[124..135]
+            $sizeStr = [System.Text.Encoding]::ASCII.GetString($sizeBytes).Trim([char]0, ' ')
+            try {
+                $fileSize = [Convert]::ToInt64($sizeStr, 8)
+            } catch {
+                # If size parsing fails, skip this entry
+                $position += 512
+                continue
+            }
+            
+            # Move to data section
+            $position += 512
+            
+            # Extract file data if it's a regular file and size > 0
+            if ($fileSize -gt 0 -and -not $fileName.EndsWith('/')) {
+                $outputPath = Join-Path $INSTALL_DIR $fileName
+                
+                # Create directory if needed
+                $outputDir = Split-Path $outputPath -Parent
+                if (-not (Test-Path $outputDir)) {
+                    New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+                }
+                
+                # Write file data
+                $fileData = $tarBytes[$position..($position + $fileSize - 1)]
+                [System.IO.File]::WriteAllBytes($outputPath, $fileData)
+                $extractedFiles++
+                
+                Write-Host "      → Extracted: $fileName" -ForegroundColor Gray
+            }
+            
+            # Move to next entry (file data is padded to 512 byte boundary)
+            $position += [Math]::Ceiling($fileSize / 512) * 512
         }
+        
+        # Clean up temporary tar file
+        Remove-Item $tarPath -Force -ErrorAction SilentlyContinue
+        
+        Write-Host "    ✓ Extracted $extractedFiles file(s)" -ForegroundColor Green
+        Write-Host "✓ Extraction complete with PowerShell!" -ForegroundColor Green
+        
     } catch {
-        Write-Host "✗ Error during extraction: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "✗ Error during PowerShell extraction: $($_.Exception.Message)" -ForegroundColor Red
         Write-Host "" -ForegroundColor Red
-        Write-Host "Manual extraction required:" -ForegroundColor Yellow
-        Write-Host "  1. Download: $OTEL_URL" -ForegroundColor White
-        Write-Host "  2. Extract to: $INSTALL_DIR" -ForegroundColor White
-        Write-Host "  3. Ensure file exists: $EXE_PATH" -ForegroundColor White
+        Write-Host "Fallback option:" -ForegroundColor Yellow
+        Write-Host "  1. Download manually: $OTEL_URL" -ForegroundColor White
+        Write-Host "  2. Extract with 7-Zip or WinRAR" -ForegroundColor White
+        Write-Host "  3. Place otelcol-contrib.exe in: $INSTALL_DIR" -ForegroundColor White
+        Write-Host "  4. Run this script again" -ForegroundColor White
         Exit-WithPause 1
     }
 }
