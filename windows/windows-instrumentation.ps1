@@ -959,93 +959,174 @@ if ($hasTar) {
         Write-Host "    → Decompressing .gz..." -ForegroundColor Gray
         $tarPath = "$env:TEMP\otelcol.tar"
         
-        Add-Type -AssemblyName System.IO.Compression
-        $gzipStream = New-Object System.IO.FileStream($OTEL_PATH, [System.IO.FileMode]::Open)
-        $gzStream = New-Object System.IO.Compression.GZipStream($gzipStream, [System.IO.Compression.CompressionMode]::Decompress)
-        $tarStream = New-Object System.IO.FileStream($tarPath, [System.IO.FileMode]::Create)
-        
-        $gzStream.CopyTo($tarStream)
-        
-        $tarStream.Close()
-        $gzStream.Close()
-        $gzipStream.Close()
-        
-        Write-Host "    ✓ Decompressed to .tar" -ForegroundColor Green
-        
-        # Step 2: Extract .tar using PowerShell tar reader
-        Write-Host "    → Extracting .tar archive..." -ForegroundColor Gray
-        
-        # Simple tar extraction for Windows executables (they're usually at root of tar)
-        # Read tar file manually since PowerShell 4.0 doesn't have native tar support
-        $tarBytes = [System.IO.File]::ReadAllBytes($tarPath)
-        $position = 0
-        $extractedFiles = 0
-        
-        while ($position -lt $tarBytes.Length - 512) {
-            # Read tar header (512 bytes)
-            $header = $tarBytes[$position..($position + 511)]
+        try {
+            Add-Type -AssemblyName System.IO.Compression
+            $gzipStream = New-Object System.IO.FileStream($OTEL_PATH, [System.IO.FileMode]::Open)
+            $gzStream = New-Object System.IO.Compression.GZipStream($gzipStream, [System.IO.Compression.CompressionMode]::Decompress)
+            $tarStream = New-Object System.IO.FileStream($tarPath, [System.IO.FileMode]::Create)
             
-            # Get filename (first 100 bytes, null-terminated)
-            $nameBytes = $header[0..99]
-            $nameEndIndex = [Array]::IndexOf($nameBytes, 0)
-            if ($nameEndIndex -lt 0) { $nameEndIndex = 100 }
-            $fileName = [System.Text.Encoding]::ASCII.GetString($nameBytes, 0, $nameEndIndex).Trim()
+            $gzStream.CopyTo($tarStream)
             
-            # Skip if empty header (end of archive)
-            if ([string]::IsNullOrEmpty($fileName)) {
-                break
-            }
+            $tarStream.Close()
+            $gzStream.Close()
+            $gzipStream.Close()
             
-            # Get file size (bytes 124-135, octal)
-            $sizeBytes = $header[124..135]
-            $sizeStr = [System.Text.Encoding]::ASCII.GetString($sizeBytes).Trim([char]0, ' ')
-            try {
-                $fileSize = [Convert]::ToInt64($sizeStr, 8)
-            } catch {
-                # If size parsing fails, skip this entry
-                $position += 512
-                continue
-            }
-            
-            # Move to data section
-            $position += 512
-            
-            # Extract file data if it's a regular file and size > 0
-            if ($fileSize -gt 0 -and -not $fileName.EndsWith('/')) {
-                $outputPath = Join-Path $INSTALL_DIR $fileName
-                
-                # Create directory if needed
-                $outputDir = Split-Path $outputPath -Parent
-                if (-not (Test-Path $outputDir)) {
-                    New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
-                }
-                
-                # Write file data
-                $fileData = $tarBytes[$position..($position + $fileSize - 1)]
-                [System.IO.File]::WriteAllBytes($outputPath, $fileData)
-                $extractedFiles++
-                
-                Write-Host "      → Extracted: $fileName" -ForegroundColor Gray
-            }
-            
-            # Move to next entry (file data is padded to 512 byte boundary)
-            $position += [Math]::Ceiling($fileSize / 512) * 512
+            Write-Host "    ✓ Decompressed to .tar" -ForegroundColor Green
+        } catch {
+            throw "Failed to decompress .gz file: $($_.Exception.Message)"
         }
         
-        # Clean up temporary tar file
-        Remove-Item $tarPath -Force -ErrorAction SilentlyContinue
+        # Step 2: Extract .tar - simplified approach focusing on the main executable
+        Write-Host "    → Extracting .tar archive..." -ForegroundColor Gray
         
-        Write-Host "    ✓ Extracted $extractedFiles file(s)" -ForegroundColor Green
-        Write-Host "✓ Extraction complete with PowerShell!" -ForegroundColor Green
+        try {
+            $tarBytes = [System.IO.File]::ReadAllBytes($tarPath)
+            $position = 0
+            $extractedFiles = 0
+            $maxIterations = 100  # Safety limit
+            $iterations = 0
+            
+            while ($position -lt $tarBytes.Length - 512 -and $iterations -lt $maxIterations) {
+                $iterations++
+                
+                # Read tar header (512 bytes)
+                if ($position + 512 -gt $tarBytes.Length) {
+                    break
+                }
+                $header = $tarBytes[$position..($position + 511)]
+                
+                # Get filename (first 100 bytes, null-terminated)
+                $nameBytes = $header[0..99]
+                $nameEndIndex = [Array]::IndexOf($nameBytes, 0)
+                if ($nameEndIndex -lt 0) { $nameEndIndex = 100 }
+                
+                $fileName = ""
+                try {
+                    $fileName = [System.Text.Encoding]::ASCII.GetString($nameBytes, 0, $nameEndIndex).Trim()
+                } catch {
+                    # Skip this entry if filename can't be decoded
+                    $position += 512
+                    continue
+                }
+                
+                # Skip if empty header (end of archive)
+                if ([string]::IsNullOrEmpty($fileName) -or $fileName -eq [char]0) {
+                    break
+                }
+                
+                # Get file size (bytes 124-135, octal)
+                $sizeBytes = $header[124..135]
+                $sizeStr = [System.Text.Encoding]::ASCII.GetString($sizeBytes).Trim([char]0, ' ')
+                
+                $fileSize = 0
+                try {
+                    if (-not [string]::IsNullOrWhiteSpace($sizeStr)) {
+                        # Remove any non-octal characters
+                        $sizeStr = $sizeStr -replace '[^0-7]', ''
+                        if (-not [string]::IsNullOrEmpty($sizeStr)) {
+                            $fileSize = [Convert]::ToInt64($sizeStr, 8)
+                        }
+                    }
+                } catch {
+                    # If size parsing fails, skip this entry
+                    $position += 512
+                    continue
+                }
+                
+                # Move to data section
+                $position += 512
+                
+                # Extract file data if it's a regular file and size > 0
+                if ($fileSize -gt 0 -and -not $fileName.EndsWith('/')) {
+                    # Clean filename - remove any path traversal and invalid chars
+                    $fileName = $fileName -replace '\.\.[\\/]', ''  # Remove ../ or ..\
+                    $fileName = $fileName -replace '^[\\/]+', ''    # Remove leading slashes
+                    
+                    # Windows invalid filename characters
+                    $invalidChars = [System.IO.Path]::GetInvalidFileNameChars() + [System.IO.Path]::GetInvalidPathChars()
+                    $cleanFileName = $fileName
+                    foreach ($char in $invalidChars) {
+                        $cleanFileName = $cleanFileName.Replace($char, '_')
+                    }
+                    
+                    # Only extract .exe files to avoid issues
+                    if ($cleanFileName.EndsWith('.exe') -or $cleanFileName -eq 'otelcol-contrib.exe') {
+                        try {
+                            $outputPath = Join-Path $INSTALL_DIR $cleanFileName
+                            
+                            # Ensure we don't go outside the install directory
+                            $fullOutputPath = [System.IO.Path]::GetFullPath($outputPath)
+                            $fullInstallDir = [System.IO.Path]::GetFullPath($INSTALL_DIR)
+                            
+                            if ($fullOutputPath.StartsWith($fullInstallDir)) {
+                                # Create directory if needed
+                                $outputDir = Split-Path $outputPath -Parent
+                                if (-not (Test-Path $outputDir)) {
+                                    New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+                                }
+                                
+                                # Write file data
+                                if ($position + $fileSize -le $tarBytes.Length) {
+                                    $fileData = $tarBytes[$position..($position + $fileSize - 1)]
+                                    [System.IO.File]::WriteAllBytes($outputPath, $fileData)
+                                    $extractedFiles++
+                                    Write-Host "      → Extracted: $cleanFileName" -ForegroundColor Gray
+                                }
+                            }
+                        } catch {
+                            Write-Host "      ⚠ Could not extract $cleanFileName : $($_.Exception.Message)" -ForegroundColor Yellow
+                        }
+                    }
+                }
+                
+                # Move to next entry (file data is padded to 512 byte boundary)
+                if ($fileSize -gt 0) {
+                    $position += [Math]::Ceiling($fileSize / 512) * 512
+                } else {
+                    $position += 512
+                }
+            }
+            
+            # Clean up temporary tar file
+            Remove-Item $tarPath -Force -ErrorAction SilentlyContinue
+            
+            if ($extractedFiles -gt 0) {
+                Write-Host "    ✓ Extracted $extractedFiles file(s)" -ForegroundColor Green
+                Write-Host "✓ Extraction complete with PowerShell!" -ForegroundColor Green
+            } else {
+                throw "No files were extracted from the tar archive"
+            }
+        } catch {
+            throw "Failed to extract tar archive: $($_.Exception.Message)"
+        }
         
     } catch {
         Write-Host "✗ Error during PowerShell extraction: $($_.Exception.Message)" -ForegroundColor Red
         Write-Host "" -ForegroundColor Red
-        Write-Host "Fallback option:" -ForegroundColor Yellow
-        Write-Host "  1. Download manually: $OTEL_URL" -ForegroundColor White
-        Write-Host "  2. Extract with 7-Zip or WinRAR" -ForegroundColor White
-        Write-Host "  3. Place otelcol-contrib.exe in: $INSTALL_DIR" -ForegroundColor White
+        Write-Host "=== MANUAL EXTRACTION REQUIRED ===" -ForegroundColor Yellow
+        Write-Host "" -ForegroundColor Yellow
+        Write-Host "The automated extraction failed. Please extract manually:" -ForegroundColor Yellow
+        Write-Host "" -ForegroundColor White
+        Write-Host "Option 1 - Using 7-Zip (Recommended):" -ForegroundColor Cyan
+        Write-Host "  1. Download 7-Zip from: https://www.7-zip.org/" -ForegroundColor White
+        Write-Host "  2. Install 7-Zip" -ForegroundColor White
+        Write-Host "  3. Run these commands:" -ForegroundColor White
+        Write-Host "     cd `"$env:TEMP`"" -ForegroundColor Gray
+        Write-Host "     & 'C:\Program Files\7-Zip\7z.exe' x otelcol.tar.gz" -ForegroundColor Gray
+        Write-Host "     & 'C:\Program Files\7-Zip\7z.exe' x otelcol.tar -o`"$INSTALL_DIR`"" -ForegroundColor Gray
+        Write-Host "" -ForegroundColor White
+        Write-Host "Option 2 - Manual download and extraction:" -ForegroundColor Cyan
+        Write-Host "  1. Download: $OTEL_URL" -ForegroundColor White
+        Write-Host "  2. Extract with 7-Zip or WinRAR (extract twice: .gz then .tar)" -ForegroundColor White
+        Write-Host "  3. Copy otelcol-contrib.exe to: $INSTALL_DIR" -ForegroundColor White
         Write-Host "  4. Run this script again" -ForegroundColor White
+        Write-Host "" -ForegroundColor White
+        Write-Host "Option 3 - Direct binary download:" -ForegroundColor Cyan
+        Write-Host "  1. Go to: https://github.com/open-telemetry/opentelemetry-collector-releases/releases" -ForegroundColor White
+        Write-Host "  2. Find version v$OTEL_VERSION" -ForegroundColor White
+        Write-Host "  3. Download the .tar.gz file for windows_amd64" -ForegroundColor White
+        Write-Host "  4. Extract and copy otelcol-contrib.exe to: $INSTALL_DIR" -ForegroundColor White
+        Write-Host "" -ForegroundColor White
         Exit-WithPause 1
     }
 }
