@@ -915,8 +915,56 @@ $OTEL_PATH = "$env:TEMP\otelcol.tar.gz"
 # Check if tar command is available (Windows 10 1803+ / Server 2019+)
 $hasTar = $null -ne (Get-Command tar -ErrorAction SilentlyContinue)
 
+if (-not $hasTar) {
+    # Try to download standalone tar.exe for legacy systems
+    Write-Host "  tar command not found - attempting to download standalone tar.exe..." -ForegroundColor Yellow
+    
+    $tarExePath = "$env:TEMP\tar.exe"
+    $tarDownloadUrl = "https://github.com/git-for-windows/git/releases/download/v2.43.0.windows.1/MinGit-2.43.0-64-bit.zip"
+    
+    try {
+        # Download MinGit which includes tar.exe
+        Write-Host "    → Downloading tar.exe from Git for Windows..." -ForegroundColor Cyan
+        $minGitPath = "$env:TEMP\mingit.zip"
+        
+        if (Download-WithRetry -Url $tarDownloadUrl -OutputPath $minGitPath -MaxRetries 2) {
+            # Extract just the tar.exe we need
+            Write-Host "    → Extracting tar.exe..." -ForegroundColor Cyan
+            
+            if ($PSVersionTable.PSVersion.Major -ge 5) {
+                # Use Expand-Archive in PS5+
+                $extractPath = "$env:TEMP\mingit"
+                Expand-Archive -Path $minGitPath -DestinationPath $extractPath -Force
+                
+                # Find tar.exe in the extracted files
+                $tarInMinGit = Get-ChildItem -Path $extractPath -Filter "tar.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+                
+                if ($tarInMinGit) {
+                    Copy-Item $tarInMinGit.FullName -Destination $tarExePath -Force
+                    $hasTar = Test-Path $tarExePath
+                    
+                    if ($hasTar) {
+                        Write-Host "    ✓ tar.exe downloaded successfully!" -ForegroundColor Green
+                        # Add tar to PATH temporarily for this session
+                        $env:PATH = "$env:TEMP;$env:PATH"
+                    }
+                }
+                
+                # Cleanup
+                Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            
+            Remove-Item $minGitPath -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        Write-Host "    ⚠ Could not download tar.exe: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "    Will use PowerShell-based extraction instead" -ForegroundColor Cyan
+    }
+}
+
 if ($hasTar) {
-    Write-Host "  Using tar command for extraction" -ForegroundColor Cyan
+    $tarCommand = if (Test-Path "$env:TEMP\tar.exe") { "$env:TEMP\tar.exe" } else { "tar" }
+    Write-Host "  Using tar for extraction" -ForegroundColor Cyan
 } else {
     Write-Host "  Using PowerShell-based extraction (legacy system)" -ForegroundColor Cyan
 }
@@ -936,10 +984,16 @@ if (-not (Download-WithRetry -Url $OTEL_URL -OutputPath $OTEL_PATH)) {
 Write-Host "Extracting files..." -ForegroundColor Green
 
 if ($hasTar) {
-    # Modern systems: use native tar command
+    # Use tar command (either native or downloaded)
     try {
-        Write-Host "  Using native tar command..." -ForegroundColor Cyan
-        $tarOutput = tar -xzf $OTEL_PATH -C $INSTALL_DIR 2>&1
+        Write-Host "  Using tar command..." -ForegroundColor Cyan
+        
+        if (Test-Path "$env:TEMP\tar.exe") {
+            $tarOutput = & "$env:TEMP\tar.exe" -xzf $OTEL_PATH -C $INSTALL_DIR 2>&1
+        } else {
+            $tarOutput = tar -xzf $OTEL_PATH -C $INSTALL_DIR 2>&1
+        }
+        
         if ($LASTEXITCODE -eq 0) {
             Write-Host "✓ Extraction complete with tar!" -ForegroundColor Green
         } else {
@@ -948,6 +1002,8 @@ if ($hasTar) {
         }
     } catch {
         Write-Host "  ⚠ Error during tar extraction: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "  Falling back to PowerShell extraction..." -ForegroundColor Cyan
+        $hasTar = $false  # Force PowerShell extraction as fallback
     }
 } else {
     # Legacy systems (2012 R2, 2016): extract .tar.gz using PowerShell
