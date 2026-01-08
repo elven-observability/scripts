@@ -241,27 +241,62 @@ if ($existingSvc) {
 }
 
 $binPath = "`"$EXPORTER_EXE`""
-Write-Host "  → Creating service with binPath: $binPath" -ForegroundColor Gray
+Write-Host "  → Creating service with PowerShell New-Service..." -ForegroundColor Gray
+Write-Host "    Exe: $EXPORTER_EXE" -ForegroundColor Gray
 
-$createOutput = sc.exe create $EXPORTER_SERVICE_NAME binPath= $binPath start= auto obj= LocalSystem DisplayName= "Windows Exporter" 2>&1
-
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "  ✓ Service created with sc.exe!" -ForegroundColor Green
-    sc.exe description $EXPORTER_SERVICE_NAME "Prometheus Windows Exporter for metrics collection" 2>&1 | Out-Null
+try {
+    New-Service -Name $EXPORTER_SERVICE_NAME `
+                -BinaryPathName $binPath `
+                -DisplayName "Windows Exporter" `
+                -Description "Prometheus Windows Exporter for metrics collection" `
+                -StartupType Automatic `
+                -ErrorAction Stop
+    
+    Write-Host "  ✓ Service created!" -ForegroundColor Green
+    
+    # Set failure recovery
     sc.exe failure $EXPORTER_SERVICE_NAME reset= 86400 actions= restart/60000/restart/60000/restart/60000 2>&1 | Out-Null
     
-    # Verify service exists
-    Start-Sleep -Seconds 2
-    $verifySvc = Get-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction SilentlyContinue
-    if (-not $verifySvc) {
-        Write-Host "  ✗ Service created but not found!" -ForegroundColor Red
-        Exit-WithPause 1
+    $createOutput = "Success"
+    
+} catch {
+    $createOutput = $_.Exception.Message
+    Write-Host "  ✗ PowerShell New-Service failed: $createOutput" -ForegroundColor Yellow
+    Write-Host "  → Trying sc.exe as fallback..." -ForegroundColor Cyan
+    
+    # Fallback to sc.exe
+    $scResult = & sc.exe create $EXPORTER_SERVICE_NAME binPath= $binPath start= auto DisplayName= "Windows Exporter" 2>&1
+    
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  ✓ Service created with sc.exe!" -ForegroundColor Green
+        sc.exe description $EXPORTER_SERVICE_NAME "Prometheus Windows Exporter for metrics collection" 2>&1 | Out-Null
+        sc.exe failure $EXPORTER_SERVICE_NAME reset= 86400 actions= restart/60000/restart/60000/restart/60000 2>&1 | Out-Null
+        $createOutput = "Success (fallback)"
+    } else {
+        $createOutput = $scResult
     }
-} else {
+}
+
+if ($LASTEXITCODE -ne 0 -and $createOutput -ne "Success" -and $createOutput -ne "Success (fallback)") {
     Write-Host "  ✗ Failed to create service" -ForegroundColor Red
     Write-Host "  Exit code: $LASTEXITCODE" -ForegroundColor Yellow
     Write-Host "  Output: $createOutput" -ForegroundColor Yellow
     Exit-WithPause 1
+} else {
+    # Verify service exists
+    Start-Sleep -Seconds 2
+    $verifySvc = Get-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction SilentlyContinue
+    if (-not $verifySvc) {
+        Write-Host "  ⚠ Service created but not found in service list!" -ForegroundColor Yellow
+        Write-Host "  Waiting 5 seconds and checking again..." -ForegroundColor Cyan
+        Start-Sleep -Seconds 5
+        $verifySvc = Get-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction SilentlyContinue
+        if (-not $verifySvc) {
+            Write-Host "  ✗ Service still not found!" -ForegroundColor Red
+            Exit-WithPause 1
+        }
+    }
+    Write-Host "  ✓ Service verified!" -ForegroundColor Green
 }
 
 # Start Windows Exporter
@@ -515,28 +550,47 @@ if (-not (Test-Path $CONFIG_FILE)) {
     Exit-WithPause 1
 }
 
-# Create service with proper escaping
-$binPath = "`"$EXE_PATH`" --config=`"$CONFIG_FILE`""
-Write-Host "  → Creating service with binPath: $binPath" -ForegroundColor Gray
+# Create service using PowerShell cmdlet (more reliable than sc.exe)
+Write-Host "  → Creating service with PowerShell New-Service..." -ForegroundColor Gray
+Write-Host "    Exe: $EXE_PATH" -ForegroundColor Gray
+Write-Host "    Config: $CONFIG_FILE" -ForegroundColor Gray
 
-# Try to create service - capture output
-$createOutput = sc.exe create $OTEL_SERVICE_NAME binPath= $binPath start= auto obj= LocalSystem DisplayName= "OpenTelemetry Collector" 2>&1
+$binPathValue = "`"$EXE_PATH`" --config=`"$CONFIG_FILE`""
 
-if ($LASTEXITCODE -eq 0) {
+try {
+    New-Service -Name $OTEL_SERVICE_NAME `
+                -BinaryPathName $binPathValue `
+                -DisplayName "OpenTelemetry Collector" `
+                -Description "OpenTelemetry Collector for metrics forwarding" `
+                -StartupType Automatic `
+                -ErrorAction Stop
+    
     Write-Host "  ✓ Service created!" -ForegroundColor Green
     
-    # Set description and failure recovery
-    sc.exe description $OTEL_SERVICE_NAME "OpenTelemetry Collector for metrics forwarding" 2>&1 | Out-Null
+    # Set failure recovery with sc.exe
     sc.exe failure $OTEL_SERVICE_NAME reset= 86400 actions= restart/60000/restart/60000/restart/60000 2>&1 | Out-Null
     
-    # Verify service exists
-    Start-Sleep -Seconds 2
-    $verifySvc = Get-Service -Name $OTEL_SERVICE_NAME -ErrorAction SilentlyContinue
-    if (-not $verifySvc) {
-        Write-Host "  ✗ Service created but not found!" -ForegroundColor Red
-        Exit-WithPause 1
+    $createOutput = "Success"
+    
+} catch {
+    $createOutput = $_.Exception.Message
+    Write-Host "  ✗ PowerShell New-Service failed: $createOutput" -ForegroundColor Yellow
+    Write-Host "  → Trying sc.exe as fallback..." -ForegroundColor Cyan
+    
+    # Fallback to sc.exe with careful syntax
+    $scResult = & sc.exe create $OTEL_SERVICE_NAME binPath= $binPathValue start= auto DisplayName= "OpenTelemetry Collector" 2>&1
+    
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  ✓ Service created with sc.exe!" -ForegroundColor Green
+        sc.exe description $OTEL_SERVICE_NAME "OpenTelemetry Collector for metrics forwarding" 2>&1 | Out-Null
+        sc.exe failure $OTEL_SERVICE_NAME reset= 86400 actions= restart/60000/restart/60000/restart/60000 2>&1 | Out-Null
+        $createOutput = "Success (fallback)"
+    } else {
+        $createOutput = $scResult
     }
-} else {
+}
+
+if ($LASTEXITCODE -ne 0 -and $createOutput -ne "Success" -and $createOutput -ne "Success (fallback)") {
     Write-Host "  ✗ Failed to create service!" -ForegroundColor Red
     Write-Host "  Exit code: $LASTEXITCODE" -ForegroundColor Yellow
     Write-Host "  Output: $createOutput" -ForegroundColor Yellow
@@ -548,6 +602,21 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "     Exe: $EXE_PATH" -ForegroundColor Gray
     Write-Host "     Config: $CONFIG_FILE" -ForegroundColor Gray
     Exit-WithPause 1
+} else {
+    # Verify service exists
+    Start-Sleep -Seconds 2
+    $verifySvc = Get-Service -Name $OTEL_SERVICE_NAME -ErrorAction SilentlyContinue
+    if (-not $verifySvc) {
+        Write-Host "  ⚠ Service created but not found in service list!" -ForegroundColor Yellow
+        Write-Host "  Waiting 5 seconds and checking again..." -ForegroundColor Cyan
+        Start-Sleep -Seconds 5
+        $verifySvc = Get-Service -Name $OTEL_SERVICE_NAME -ErrorAction SilentlyContinue
+        if (-not $verifySvc) {
+            Write-Host "  ✗ Service still not found!" -ForegroundColor Red
+            Exit-WithPause 1
+        }
+    }
+    Write-Host "  ✓ Service verified!" -ForegroundColor Green
 }
 
 # Start service
