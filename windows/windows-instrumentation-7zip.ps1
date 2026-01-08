@@ -110,22 +110,36 @@ Write-Host ""
 Write-Host "=== Pre-Installation Cleanup ===" -ForegroundColor Green
 Write-Host ""
 
-# Stop services
+# Stop services - multiple attempts
 Write-Host "[1/6] Stopping services..." -ForegroundColor Yellow
-Stop-Service -Name $EXPORTER_SERVICE_NAME -Force -ErrorAction SilentlyContinue
-Stop-Service -Name $OTEL_SERVICE_NAME -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 2
+for ($i = 1; $i -le 3; $i++) {
+    Stop-Service -Name $EXPORTER_SERVICE_NAME -Force -ErrorAction SilentlyContinue
+    Stop-Service -Name $OTEL_SERVICE_NAME -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+}
 
-# Delete services
+# Delete services - multiple attempts
 Write-Host "[2/6] Removing services..." -ForegroundColor Yellow
-sc.exe delete $EXPORTER_SERVICE_NAME 2>$null | Out-Null
-sc.exe delete $OTEL_SERVICE_NAME 2>$null | Out-Null
-Start-Sleep -Seconds 2
+for ($i = 1; $i -le 3; $i++) {
+    sc.exe delete $EXPORTER_SERVICE_NAME 2>&1 | Out-Null
+    sc.exe delete $OTEL_SERVICE_NAME 2>&1 | Out-Null
+    Start-Sleep -Seconds 2
+    
+    # Verify they're gone
+    $svc1 = Get-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction SilentlyContinue
+    $svc2 = Get-Service -Name $OTEL_SERVICE_NAME -ErrorAction SilentlyContinue
+    
+    if (-not $svc1 -and -not $svc2) {
+        Write-Host "  ✓ Services removed" -ForegroundColor Green
+        break
+    }
+}
 
-# Kill processes
+# Kill processes - force kill everything
 Write-Host "[3/6] Terminating processes..." -ForegroundColor Yellow
-Get-Process -Name "windows_exporter","otelcol*" -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Seconds 2
+Get-Process -Name "windows_exporter*" -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process -Name "otelcol*" -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 3
 
 # Free port 9182
 Write-Host "[4/6] Freeing port 9182..." -ForegroundColor Yellow
@@ -136,12 +150,19 @@ if ($connections) {
         Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Seconds 3
-    Write-Host "  ✓ Port 9182 freed" -ForegroundColor Green
+    
+    # Verify port is free
+    $checkPort = Get-NetTCPConnection -LocalPort 9182 -ErrorAction SilentlyContinue
+    if ($checkPort) {
+        Write-Host "  ⚠ Port 9182 still in use!" -ForegroundColor Yellow
+    } else {
+        Write-Host "  ✓ Port 9182 freed" -ForegroundColor Green
+    }
 } else {
     Write-Host "  ✓ Port 9182 already free" -ForegroundColor Green
 }
 
-# Remove directories
+# Remove directories - multiple attempts with force
 Write-Host "[5/6] Removing old directories..." -ForegroundColor Yellow
 $dirsToRemove = @(
     "C:\Program Files\windows_exporter",
@@ -152,12 +173,23 @@ $dirsToRemove = @(
 
 foreach ($dir in $dirsToRemove) {
     if (Test-Path $dir) {
-        Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+        for ($i = 1; $i -le 3; $i++) {
+            try {
+                Remove-Item $dir -Recurse -Force -ErrorAction Stop
+                break
+            } catch {
+                if ($i -eq 3) {
+                    Write-Host "  ⚠ Could not remove: $dir" -ForegroundColor Yellow
+                }
+                Start-Sleep -Seconds 2
+            }
+        }
     }
 }
 
+# Wait for Windows to settle
 Write-Host "[6/6] Waiting for Windows to release resources..." -ForegroundColor Yellow
-Start-Sleep -Seconds 5
+Start-Sleep -Seconds 10
 Write-Host "  ✓ System ready for clean installation!" -ForegroundColor Green
 Write-Host ""
 
@@ -198,15 +230,37 @@ try {
 # Create Windows Exporter service
 Write-Host "Creating Windows Exporter service..." -ForegroundColor Green
 
+# Safety check: ensure service doesn't exist
+$existingSvc = Get-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction SilentlyContinue
+if ($existingSvc) {
+    Write-Host "  → Removing existing service..." -ForegroundColor Yellow
+    Stop-Service -Name $EXPORTER_SERVICE_NAME -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    sc.exe delete $EXPORTER_SERVICE_NAME 2>&1 | Out-Null
+    Start-Sleep -Seconds 3
+}
+
 $binPath = "`"$EXPORTER_EXE`""
-$result = sc.exe create $EXPORTER_SERVICE_NAME binPath= $binPath start= auto obj= LocalSystem DisplayName= "Windows Exporter"
+Write-Host "  → Creating service with binPath: $binPath" -ForegroundColor Gray
+
+$createOutput = sc.exe create $EXPORTER_SERVICE_NAME binPath= $binPath start= auto obj= LocalSystem DisplayName= "Windows Exporter" 2>&1
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "  ✓ Service created with sc.exe!" -ForegroundColor Green
-    sc.exe description $EXPORTER_SERVICE_NAME "Prometheus Windows Exporter for metrics collection" | Out-Null
-    sc.exe failure $EXPORTER_SERVICE_NAME reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
+    sc.exe description $EXPORTER_SERVICE_NAME "Prometheus Windows Exporter for metrics collection" 2>&1 | Out-Null
+    sc.exe failure $EXPORTER_SERVICE_NAME reset= 86400 actions= restart/60000/restart/60000/restart/60000 2>&1 | Out-Null
+    
+    # Verify service exists
+    Start-Sleep -Seconds 2
+    $verifySvc = Get-Service -Name $EXPORTER_SERVICE_NAME -ErrorAction SilentlyContinue
+    if (-not $verifySvc) {
+        Write-Host "  ✗ Service created but not found!" -ForegroundColor Red
+        Exit-WithPause 1
+    }
 } else {
     Write-Host "  ✗ Failed to create service" -ForegroundColor Red
+    Write-Host "  Exit code: $LASTEXITCODE" -ForegroundColor Yellow
+    Write-Host "  Output: $createOutput" -ForegroundColor Yellow
     Exit-WithPause 1
 }
 
@@ -280,6 +334,16 @@ if ($has7Zip -or $has7ZipX86) {
     Write-Host ""
     Exit-WithPause 1
 }
+
+# Clean up any previous extraction attempts
+Write-Host "Cleaning temporary files..." -ForegroundColor Cyan
+$tempTar = "$env:TEMP\otelcol.tar"
+if (Test-Path $tempTar) {
+    Remove-Item $tempTar -Force -ErrorAction SilentlyContinue
+}
+Remove-Item "$env:TEMP\otelcol-contrib.exe" -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:TEMP\LICENSE" -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:TEMP\README.md" -Force -ErrorAction SilentlyContinue
 
 # Extract with best available method
 Write-Host "Extracting files..." -ForegroundColor Green
@@ -412,18 +476,77 @@ service:
 $configContent | Out-File -FilePath $CONFIG_FILE -Encoding UTF8
 Write-Host "  ✓ Configuration created!" -ForegroundColor Green
 
-# Create service
+# Create service - with multiple safeguards
 Write-Host "Creating OpenTelemetry Collector service..." -ForegroundColor Green
 
+# Triple-check: Remove any existing service (even if we already did it)
+$existingSvc = Get-Service -Name $OTEL_SERVICE_NAME -ErrorAction SilentlyContinue
+if ($existingSvc) {
+    Write-Host "  → Removing existing service (safety check)..." -ForegroundColor Yellow
+    Stop-Service -Name $OTEL_SERVICE_NAME -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 3
+    
+    # Try multiple times to delete
+    for ($i = 1; $i -le 3; $i++) {
+        sc.exe delete $OTEL_SERVICE_NAME 2>&1 | Out-Null
+        Start-Sleep -Seconds 2
+        $checkSvc = Get-Service -Name $OTEL_SERVICE_NAME -ErrorAction SilentlyContinue
+        if (-not $checkSvc) {
+            Write-Host "  ✓ Old service removed" -ForegroundColor Green
+            break
+        }
+        if ($i -eq 3) {
+            Write-Host "  ✗ Could not remove existing service!" -ForegroundColor Red
+            Write-Host "  Run manually: sc.exe delete $OTEL_SERVICE_NAME" -ForegroundColor Yellow
+            Exit-WithPause 1
+        }
+    }
+    Start-Sleep -Seconds 3
+}
+
+# Verify paths exist
+if (-not (Test-Path $EXE_PATH)) {
+    Write-Host "  ✗ Executable not found: $EXE_PATH" -ForegroundColor Red
+    Exit-WithPause 1
+}
+
+if (-not (Test-Path $CONFIG_FILE)) {
+    Write-Host "  ✗ Config not found: $CONFIG_FILE" -ForegroundColor Red
+    Exit-WithPause 1
+}
+
+# Create service with proper escaping
 $binPath = "`"$EXE_PATH`" --config=`"$CONFIG_FILE`""
-$result = sc.exe create $OTEL_SERVICE_NAME binPath= $binPath start= auto obj= LocalSystem DisplayName= "OpenTelemetry Collector"
+Write-Host "  → Creating service with binPath: $binPath" -ForegroundColor Gray
+
+# Try to create service - capture output
+$createOutput = sc.exe create $OTEL_SERVICE_NAME binPath= $binPath start= auto obj= LocalSystem DisplayName= "OpenTelemetry Collector" 2>&1
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "  ✓ Service created!" -ForegroundColor Green
-    sc.exe description $OTEL_SERVICE_NAME "OpenTelemetry Collector for metrics forwarding" | Out-Null
-    sc.exe failure $OTEL_SERVICE_NAME reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
+    
+    # Set description and failure recovery
+    sc.exe description $OTEL_SERVICE_NAME "OpenTelemetry Collector for metrics forwarding" 2>&1 | Out-Null
+    sc.exe failure $OTEL_SERVICE_NAME reset= 86400 actions= restart/60000/restart/60000/restart/60000 2>&1 | Out-Null
+    
+    # Verify service exists
+    Start-Sleep -Seconds 2
+    $verifySvc = Get-Service -Name $OTEL_SERVICE_NAME -ErrorAction SilentlyContinue
+    if (-not $verifySvc) {
+        Write-Host "  ✗ Service created but not found!" -ForegroundColor Red
+        Exit-WithPause 1
+    }
 } else {
     Write-Host "  ✗ Failed to create service!" -ForegroundColor Red
+    Write-Host "  Exit code: $LASTEXITCODE" -ForegroundColor Yellow
+    Write-Host "  Output: $createOutput" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Troubleshooting:" -ForegroundColor Yellow
+    Write-Host "  1. Check if service exists: Get-Service otelcol" -ForegroundColor White
+    Write-Host "  2. Delete manually: sc.exe delete otelcol" -ForegroundColor White
+    Write-Host "  3. Check paths:" -ForegroundColor White
+    Write-Host "     Exe: $EXE_PATH" -ForegroundColor Gray
+    Write-Host "     Config: $CONFIG_FILE" -ForegroundColor Gray
     Exit-WithPause 1
 }
 
