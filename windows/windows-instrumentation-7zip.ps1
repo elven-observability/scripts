@@ -281,6 +281,18 @@ if ($has7Zip -or $has7ZipX86) {
     Exit-WithPause 1
 }
 
+# Clean up any previous extraction attempts
+Write-Host "Cleaning temporary files..." -ForegroundColor Cyan
+$tempTar = "$env:TEMP\otelcol.tar"
+if (Test-Path $tempTar) {
+    Remove-Item $tempTar -Force -ErrorAction SilentlyContinue
+}
+Remove-Item "$env:TEMP\otelcol.tar.gz" -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:TEMP\otelcol.tar" -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:TEMP\otelcol-contrib.exe" -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:TEMP\LICENSE" -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:TEMP\README.md" -Force -ErrorAction SilentlyContinue
+
 # Extract with best available method
 Write-Host "Extracting files..." -ForegroundColor Green
 
