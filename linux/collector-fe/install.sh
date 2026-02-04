@@ -14,6 +14,7 @@
 # Usage:
 #   Interactive:  sudo ./install.sh
 #   With env vars: sudo SECRET_KEY=... LOKI_URL=... LOKI_API_TOKEN=... ALLOW_ORIGINS=... ./install.sh
+#   Private repo:  GITHUB_TOKEN=$(gh auth token) sudo -E bash -c 'curl -sSL ... | bash'
 #   From local binary: sudo LOCAL_BINARY=/path/to/collector-fe-instrumentation-linux-amd64 ./install.sh
 
 set -e
@@ -92,13 +93,14 @@ detect_distro() {
 get_latest_version() {
     local url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
     local tag
-    tag=$(curl -sL "$url" 2>/dev/null | grep -oP '"tag_name":\s*"\K[^"]+' | head -1)
+    if [ -n "$GITHUB_TOKEN" ]; then
+        tag=$(curl -sL -H "Authorization: Bearer $GITHUB_TOKEN" "$url" 2>/dev/null | grep -oP '"tag_name":\s*"\K[^"]+' | head -1)
+    else
+        tag=$(curl -sL "$url" 2>/dev/null | grep -oP '"tag_name":\s*"\K[^"]+' | head -1)
+    fi
     if [ -z "$tag" ]; then
-        print_error "Could not fetch latest release from GitHub (repo: $GITHUB_REPO)"
-        print_info "  → Create a release with binaries at: https://github.com/${GITHUB_REPO}/releases"
-        print_info "  → Or install from local file: LOCAL_BINARY=/path/to/collector-fe-instrumentation-linux-amd64 $0"
-        print_info "  → Or set BINARY_URL to a direct download URL"
-        exit 1
+        print_warning "Could not fetch latest release from GitHub (repo: $GITHUB_REPO), trying v0.1.0"
+        tag="v0.1.0"
     fi
     echo "$tag"
 }
@@ -125,7 +127,11 @@ download_with_retry() {
         retry=$((retry + 1))
         print_info "  Attempt $retry of $max_retries..."
         local code
-        code=$(curl -sSL -w '%{http_code}' -o "$output" "$url" 2>/dev/null) || code="000"
+        if [ -n "$GITHUB_TOKEN" ]; then
+            code=$(curl -sSL -w '%{http_code}' -o "$output" -H "Authorization: Bearer $GITHUB_TOKEN" "$url" 2>/dev/null) || code="000"
+        else
+            code=$(curl -sSL -w '%{http_code}' -o "$output" "$url" 2>/dev/null) || code="000"
+        fi
         if [ -f "$output" ] && [ -s "$output" ] && [ "$code" = "200" ]; then
             print_success "Download complete"
             return 0
@@ -137,6 +143,46 @@ download_with_retry() {
         fi
         [ $retry -lt $max_retries ] && sleep 3
     done
+    return 1
+}
+
+# Download release asset from private repo via GitHub API (requires GITHUB_TOKEN).
+download_github_asset() {
+    local token=$1
+    local repo=$2
+    local version=$3
+    local asset_name=$4
+    local output=$5
+    local api_url
+    if [ "$version" = "latest" ]; then
+        api_url="https://api.github.com/repos/${repo}/releases/latest"
+    else
+        api_url="https://api.github.com/repos/${repo}/releases/tags/${version}"
+    fi
+    local json
+    json=$(curl -sL -H "Authorization: Bearer $token" "$api_url" 2>/dev/null)
+    [ -z "$json" ] && return 1
+    local asset_id
+    if command -v jq &>/dev/null; then
+        asset_id=$(echo "$json" | jq -r --arg n "$asset_name" '.assets[] | select(.name == $n) | .id' 2>/dev/null)
+    elif command -v python3 &>/dev/null; then
+        asset_id=$(echo "$json" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    for a in d.get('assets', []):
+        if a.get('name') == sys.argv[1]:
+            print(a['id'])
+            break
+except Exception:
+    pass
+" "$asset_name" 2>/dev/null)
+    fi
+    [ -z "$asset_id" ] && return 1
+    local asset_url="https://api.github.com/repos/${repo}/releases/assets/${asset_id}"
+    if curl -sSL -H "Authorization: Bearer $token" -H "Accept: application/octet-stream" -o "$output" "$asset_url" 2>/dev/null; then
+        [ -f "$output" ] && [ -s "$output" ] && return 0
+    fi
     return 1
 }
 
@@ -183,12 +229,8 @@ get_user_input() {
         fi
     done
 
-    while [ -z "$ALLOW_ORIGINS" ]; do
-        read -p "ALLOW_ORIGINS (comma-separated, e.g. https://app.example.com): " ALLOW_ORIGINS < /dev/tty
-        if [ -z "$ALLOW_ORIGINS" ]; then
-            print_error "ALLOW_ORIGINS cannot be empty"
-        fi
-    done
+    read -p "ALLOW_ORIGINS (comma-separated or * for all) [default: *]: " ALLOW_ORIGINS < /dev/tty
+    ALLOW_ORIGINS=${ALLOW_ORIGINS:-*}
 
     read -p "PORT [default: 3000]: " PORT < /dev/tty
     PORT=${PORT:-3000}
@@ -267,22 +309,39 @@ install_binary() {
         cp -f "/tmp/${BINARY_NAME}-linux-${arch}" "$binary_path"
         rm -f "/tmp/${BINARY_NAME}-linux-${arch}"
     else
+        # Resolve token: GITHUB_TOKEN or gh auth token (for private repo)
+        [ -z "$GITHUB_TOKEN" ] && command -v gh &>/dev/null && GITHUB_TOKEN=$(gh auth token 2>/dev/null)
         local version="$COLLECTOR_VERSION"
         if [ "$version" = "latest" ]; then
             version=$(get_latest_version)
-            print_info "Latest release: $version"
+            print_info "Release: $version"
         fi
-        local url="https://github.com/${GITHUB_REPO}/releases/download/${version}/${BINARY_NAME}-linux-${arch}"
-        print_info "Downloading $url..."
-        if ! download_with_retry "$url" "/tmp/${BINARY_NAME}-linux-${arch}"; then
-            print_error "Download failed."
-            print_info "  1) Create a release with binaries: https://github.com/${GITHUB_REPO}/releases"
-            print_info "  2) Or copy binary to VM and run: LOCAL_BINARY=/path/to/${BINARY_NAME}-linux-${arch} $0"
-            print_info "  3) Or set BINARY_URL to a direct download URL"
-            exit 1
+        local output_tmp="/tmp/${BINARY_NAME}-linux-${arch}"
+        local asset_name="${BINARY_NAME}-linux-${arch}"
+        if [ -n "$GITHUB_TOKEN" ]; then
+            if ! command -v jq &>/dev/null && ! command -v python3 &>/dev/null; then
+                print_error "Private repo requires jq or python3 to parse release. Install one: apt install -y jq"
+                exit 1
+            fi
+            print_info "Repo: $GITHUB_REPO (private) | Downloading asset: $asset_name"
+            if ! download_github_asset "$GITHUB_TOKEN" "$GITHUB_REPO" "$version" "$asset_name" "$output_tmp"; then
+                print_error "Download failed (private repo). Check GITHUB_TOKEN or run: gh auth login"
+                print_info "  Or use: GITHUB_TOKEN=\$(gh auth token) $0"
+                exit 1
+            fi
+        else
+            local url="https://github.com/${GITHUB_REPO}/releases/download/${version}/${asset_name}"
+            print_info "Repo: $GITHUB_REPO | Downloading: $url"
+            if ! download_with_retry "$url" "$output_tmp"; then
+                print_error "Download failed."
+                print_info "  For private repo use: GITHUB_TOKEN=\$(gh auth token) $0"
+                print_info "  Or: LOCAL_BINARY=/path/to/${asset_name} $0"
+                print_info "  Or: BINARY_URL=<public-url> $0"
+                exit 1
+            fi
         fi
-        cp -f "/tmp/${BINARY_NAME}-linux-${arch}" "$binary_path"
-        rm -f "/tmp/${BINARY_NAME}-linux-${arch}"
+        cp -f "$output_tmp" "$binary_path"
+        rm -f "$output_tmp"
     fi
 
     chmod +x "$binary_path"
