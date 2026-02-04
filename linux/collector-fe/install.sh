@@ -3,6 +3,9 @@
 # Universal Linux installer for Faro Collector (Frontend Instrumentation → Loki)
 # Elven Observability - Faro Collector
 #
+# Recommended one-liner (use this repo's script):
+#   curl -sSL https://raw.githubusercontent.com/elven-observability/collector-fe-instrumentation/main/scripts/install.sh | sudo bash
+#
 # Supported distributions:
 # - Ubuntu/Debian (apt)
 # - RHEL/CentOS/Rocky/AlmaLinux/Fedora (yum/dnf)
@@ -14,6 +17,7 @@
 #   From local binary: sudo LOCAL_BINARY=/path/to/collector-fe-instrumentation-linux-amd64 ./install.sh
 
 set -e
+trap 'e=$?; if [ $e -ne 0 ]; then echo ""; echo -e "\033[0;31m✗ Installation failed (exit $e). See errors above.\033[0m"; exit $e; fi' EXIT
 
 # Colors
 RED='\033[0;31m'
@@ -146,14 +150,14 @@ get_user_input() {
         PORT=${PORT:-3000}
         JWT_ISSUER=${JWT_ISSUER:-trusted-issuer}
         JWT_VALIDATE_EXP=${JWT_VALIDATE_EXP:-false}
-        if [ ${#SECRET_KEY} -lt 32 ]; then
-            print_error "SECRET_KEY must be at least 32 characters"
+        if [ ${#SECRET_KEY} -lt 64 ]; then
+            print_error "SECRET_KEY must be at least 64 characters"
             exit 1
         fi
         print_success "Configuration loaded from environment"
-        echo "  SECRET_KEY:    (set, ${#SECRET_KEY} chars)"
-        echo "  LOKI_URL:      $LOKI_URL"
-        echo "  LOKI_API_TOKEN: (set)"
+        echo "  SECRET_KEY:     (set, ${#SECRET_KEY} chars)"
+        echo "  LOKI_URL:       $LOKI_URL"
+        echo "  LOKI_API_TOKEN: ****"
         echo "  ALLOW_ORIGINS: $ALLOW_ORIGINS"
         echo "  PORT:          $PORT"
         print_info ""
@@ -161,19 +165,15 @@ get_user_input() {
     fi
 
     while [ -z "$SECRET_KEY" ]; do
-        read -p "SECRET_KEY (min 32 chars, for JWT validation): " SECRET_KEY < /dev/tty
-        if [ ${#SECRET_KEY} -lt 32 ]; then
-            print_error "SECRET_KEY must be at least 32 characters"
+        read -p "SECRET_KEY (min 64 chars, for JWT validation): " SECRET_KEY < /dev/tty
+        if [ ${#SECRET_KEY} -lt 64 ]; then
+            print_error "SECRET_KEY must be at least 64 characters"
             SECRET_KEY=""
         fi
     done
 
-    while [ -z "$LOKI_URL" ]; do
-        read -p "LOKI_URL (e.g. https://loki.elvenobservability.com): " LOKI_URL < /dev/tty
-        if [ -z "$LOKI_URL" ]; then
-            print_error "LOKI_URL cannot be empty"
-        fi
-    done
+    read -p "LOKI_URL [default: https://loki.elvenobservability.com]: " LOKI_URL < /dev/tty
+    LOKI_URL=${LOKI_URL:-https://loki.elvenobservability.com}
 
     while [ -z "$LOKI_API_TOKEN" ]; do
         read -sp "LOKI_API_TOKEN: " LOKI_API_TOKEN < /dev/tty
@@ -201,9 +201,10 @@ get_user_input() {
 
     print_info ""
     print_success "Configuration summary:"
-    echo "  LOKI_URL:      $LOKI_URL"
-    echo "  ALLOW_ORIGINS: $ALLOW_ORIGINS"
-    echo "  PORT:          $PORT"
+    echo "  LOKI_URL:       $LOKI_URL"
+    echo "  LOKI_API_TOKEN: ****"
+    echo "  ALLOW_ORIGINS:  $ALLOW_ORIGINS"
+    echo "  PORT:           $PORT"
     print_info ""
 
     read -p "Continue with installation? (y/n): " CONFIRM < /dev/tty
