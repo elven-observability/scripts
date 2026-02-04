@@ -7,14 +7,14 @@ Universal installer for **Node Exporter** + **OpenTelemetry Collector** on Linux
 ### Option 1: One-liner (direct execution)
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/linux-instrumentation.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-instrumentation.sh | sudo bash
 ```
 
 ### Option 2: Download and run (recommended for production)
 
 ```bash
 # Download
-curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/linux-instrumentation.sh -o install.sh
+curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-instrumentation.sh -o install.sh
 
 # Make executable
 chmod +x install.sh
@@ -240,7 +240,7 @@ To update to a newer version:
 sudo systemctl stop otelcol node_exporter
 
 # Re-run the installation script (it will detect and update existing installations)
-curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/linux-instrumentation.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-instrumentation.sh | sudo bash
 ```
 
 ## 🗑️ Uninstallation
@@ -307,7 +307,7 @@ export INSTANCE_NAME="server-01"
 export CUSTOMER_NAME="acme-corp"
 export ENVIRONMENT="production"
 
-curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/linux-instrumentation.sh | sudo -E bash
+curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-instrumentation.sh | sudo -E bash
 ```
 
 ## 📞 Support
@@ -321,7 +321,7 @@ For issues or questions:
 
 ### Basic installation on Ubuntu
 ```bash
-curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/linux-instrumentation.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-instrumentation.sh | sudo bash
 ```
 
 ### Check everything is working
@@ -339,8 +339,32 @@ sudo journalctl -u otelcol -f
 ### Reinstall/Update
 ```bash
 # Just run the script again - it will stop existing services and reinstall
-curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/linux-instrumentation.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-instrumentation.sh | sudo bash
 ```
+
+---
+
+## 🎯 Collector FE – Faro (Frontend Instrumentation → Loki)
+
+Installs the **Faro Collector** as a systemd service for frontend instrumentation (browser logs → Loki).
+
+📖 **[Full Collector FE Documentation](./collector-fe/)**
+
+### Quick Installation
+
+```bash
+curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/collector-fe/install.sh | sudo bash
+```
+
+### Quick Actions (Collector FE)
+
+| Task | Command |
+|------|---------|
+| **Install** | `curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/collector-fe/install.sh \| sudo bash` |
+| **Check Status** | `systemctl status collector-fe-instrumentation` |
+| **Restart** | `sudo systemctl restart collector-fe-instrumentation` |
+| **Logs** | `journalctl -u collector-fe-instrumentation -f` |
+| **Health** | `curl http://localhost:3000/health` |
 
 ---
 
@@ -353,14 +377,14 @@ Universal installer for **Zabbix Proxy 7.0 LTS** + **PostgreSQL 17** on Linux se
 #### Option 1: One-liner (direct execution)
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/zabbix-proxy-install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/zabbix/zabbix-proxy-install.sh | sudo bash
 ```
 
 #### Option 2: Download and run (recommended for production)
 
 ```bash
 # Download
-curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/zabbix-proxy-install.sh -o zabbix-proxy-install.sh
+curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/zabbix/zabbix-proxy-install.sh -o zabbix-proxy-install.sh
 
 # Make executable
 chmod +x zabbix-proxy-install.sh
@@ -490,7 +514,7 @@ export PROXY_MODE="0"  # 0=Active, 1=Passive
 export DB_PASSWORD="secure-password"
 export PERFORMANCE_PROFILE="medium"
 
-curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/zabbix-proxy-install.sh | sudo -E bash
+curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/zabbix/zabbix-proxy-install.sh | sudo -E bash
 ```
 
 ### 🔒 Security
@@ -564,7 +588,7 @@ To update to a newer version:
 sudo systemctl stop zabbix-proxy
 
 # Re-run the installation script (it will detect and update existing installations)
-curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/zabbix-proxy-install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/zabbix/zabbix-proxy-install.sh | sudo bash
 ```
 
 ### 🗑️ Uninstallation
@@ -618,6 +642,40 @@ For issues or questions:
 - 📧 Email: support@elvenobservability.com
 - 🐛 Issues: [GitHub Issues](https://github.com/elven-observability/scripts/issues)
 - 📚 Documentation: [docs.elvenobservability.com](https://docs.elvenobservability.com)
+
+---
+
+## ⚡ Quick Reference (Linux Scripts)
+
+### Node Exporter + OTel Collector
+
+| Task | Command |
+|------|---------|
+| **Install** | `curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-instrumentation.sh \| sudo bash` |
+| **Check Status** | `systemctl status node_exporter otelcol` |
+| **Restart** | `sudo systemctl restart otelcol` |
+| **Logs** | `journalctl -u otelcol -f` |
+| **Test Exporter** | `curl http://localhost:9100/metrics` |
+
+### Collector FE – Faro
+
+| Task | Command |
+|------|---------|
+| **Install** | `curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/collector-fe/install.sh \| sudo bash` |
+| **Check Status** | `systemctl status collector-fe-instrumentation` |
+| **Restart** | `sudo systemctl restart collector-fe-instrumentation` |
+| **Logs** | `journalctl -u collector-fe-instrumentation -f` |
+| **Health** | `curl http://localhost:3000/health` |
+
+### Zabbix Proxy
+
+| Task | Command |
+|------|---------|
+| **Install** | `curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/zabbix/zabbix-proxy-install.sh \| sudo bash` |
+| **Check Status** | `systemctl status zabbix-proxy postgresql` |
+| **Restart** | `sudo systemctl restart zabbix-proxy` |
+| **Logs** | `journalctl -u zabbix-proxy -f` |
+| **View Config** | `cat /etc/zabbix/zabbix_proxy.conf` |
 
 ---
 

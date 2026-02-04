@@ -8,9 +8,10 @@ These scripts provide one-liner installation of observability agents for the **E
 
 - **Windows**: Windows Exporter + OpenTelemetry Collector
 - **Linux**: Node Exporter + OpenTelemetry Collector
+- **Linux**: Faro Collector (Frontend Instrumentation → Loki)
 - **Linux**: Zabbix Proxy 7.0 LTS + PostgreSQL 17 (for Zabbix monitoring infrastructure)
 
-The instrumentation scripts automatically install, configure, and start monitoring services that send metrics to your Elven Observability Mimir instance. The Zabbix Proxy script sets up a complete Zabbix proxy infrastructure with PostgreSQL database.
+The instrumentation scripts automatically install, configure, and start monitoring services that send metrics to your Elven Observability Mimir instance (or logs to Loki for the Faro Collector). The Zabbix Proxy script sets up a complete Zabbix proxy infrastructure with PostgreSQL database.
 
 ## 🚀 Quick Start
 
@@ -24,22 +25,32 @@ iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/win
 
 📖 [Full Windows Documentation](./windows/)
 
-### Linux
+### Linux (Node Exporter + OTel Collector)
 
 Run as **root or with sudo**:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/linux-instrumentation.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-instrumentation.sh | sudo bash
 ```
 
 📖 [Full Linux Documentation](./linux/)
+
+### Collector FE – Faro (Linux)
+
+Run as **root or with sudo** (frontend instrumentation → Loki):
+
+```bash
+curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/collector-fe/install.sh | sudo bash
+```
+
+📖 [Collector FE Documentation](./linux/collector-fe/)
 
 ### Zabbix Proxy (Linux)
 
 Run as **root or with sudo**:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/zabbix-proxy-install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/zabbix/zabbix-proxy-install.sh | sudo bash
 ```
 
 📖 [Full Linux Documentation](./linux/) (includes Zabbix Proxy details)
@@ -106,12 +117,18 @@ Server (Windows/Linux)
 ```
 scripts/
 ├── windows/
-│   ├── windows-instrumentation.ps1    # Main installation script
-│   └── README.md                       # Windows documentation
+│   ├── windows-instrumentation.ps1     # Windows Exporter + OTel Collector
+│   ├── windows-instrumentation-7zip.ps1
+│   └── README.md
 └── linux/
-    ├── linux-instrumentation.sh        # Main installation script
-    ├── zabbix-proxy-install.sh         # Zabbix Proxy installer
-    └── README.md                        # Linux documentation
+    ├── README.md
+    ├── node_exporter/
+    │   └── linux-instrumentation.sh   # Node Exporter + OTel Collector
+    ├── collector-fe/
+    │   ├── install.sh                 # Faro Collector (FE → Loki)
+    │   └── README.md
+    └── zabbix/
+        └── zabbix-proxy-install.sh    # Zabbix Proxy 7.0 LTS + PostgreSQL 17
 ```
 
 ## 🔧 Configuration
@@ -186,7 +203,7 @@ iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/win
 
 ### Linux
 ```bash
-curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/linux-instrumentation.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-instrumentation.sh | sudo bash
 ```
 
 ## 🗑️ Uninstallation
@@ -323,11 +340,21 @@ We welcome contributions! Please:
 | **Logs** | `Get-WinEvent` | `journalctl -u otelcol -f` |
 | **Test Exporter** | `curl http://localhost:9182/metrics` | `curl http://localhost:9100/metrics` |
 
+### Collector FE – Faro (Linux)
+
+| Task | Command |
+|------|---------|
+| **Install** | `curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/collector-fe/install.sh \| sudo bash` |
+| **Check Status** | `systemctl status collector-fe-instrumentation` |
+| **Restart** | `sudo systemctl restart collector-fe-instrumentation` |
+| **Logs** | `journalctl -u collector-fe-instrumentation -f` |
+| **Health** | `curl http://localhost:3000/health` |
+
 ### Zabbix Proxy (Linux)
 
 | Task | Command |
 |------|---------|
-| **Install** | `curl -sSL <url> \| sudo bash` |
+| **Install** | `curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/zabbix/zabbix-proxy-install.sh \| sudo bash` |
 | **Check Status** | `systemctl status zabbix-proxy postgresql` |
 | **Restart** | `sudo systemctl restart zabbix-proxy` |
 | **Logs** | `journalctl -u zabbix-proxy -f` |
