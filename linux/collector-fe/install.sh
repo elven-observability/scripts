@@ -23,7 +23,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Defaults (override via env or GitHub Release)
-GITHUB_REPO="${GITHUB_REPO:-elven/collector-fe-instrumentation}"
+GITHUB_REPO="${GITHUB_REPO:-elven-observability/collector-fe-instrumentation}"
 COLLECTOR_VERSION="${COLLECTOR_VERSION:-latest}"
 INSTALL_DIR="/opt/collector-fe-instrumentation"
 CONFIG_DIR="/etc/collector-fe-instrumentation"
@@ -88,9 +88,12 @@ detect_distro() {
 get_latest_version() {
     local url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
     local tag
-    tag=$(curl -sL "$url" | grep -oP '"tag_name":\s*"\K[^"]+' | head -1)
+    tag=$(curl -sL "$url" 2>/dev/null | grep -oP '"tag_name":\s*"\K[^"]+' | head -1)
     if [ -z "$tag" ]; then
-        print_error "Could not fetch latest release from GitHub"
+        print_error "Could not fetch latest release from GitHub (repo: $GITHUB_REPO)"
+        print_info "  → Create a release with binaries at: https://github.com/${GITHUB_REPO}/releases"
+        print_info "  → Or install from local file: LOCAL_BINARY=/path/to/collector-fe-instrumentation-linux-amd64 $0"
+        print_info "  → Or set BINARY_URL to a direct download URL"
         exit 1
     fi
     echo "$tag"
@@ -117,15 +120,19 @@ download_with_retry() {
     while [ $retry -lt $max_retries ]; do
         retry=$((retry + 1))
         print_info "  Attempt $retry of $max_retries..."
-        if curl -L -f -o "$output" "$url" 2>/dev/null; then
-            if [ -f "$output" ] && [ -s "$output" ]; then
-                print_success "Download complete"
-                return 0
-            fi
+        local code
+        code=$(curl -sSL -w '%{http_code}' -o "$output" "$url" 2>/dev/null) || code="000"
+        if [ -f "$output" ] && [ -s "$output" ] && [ "$code" = "200" ]; then
+            print_success "Download complete"
+            return 0
+        fi
+        if [ $retry -eq $max_retries ]; then
+            print_error "Download failed (HTTP $code). URL: $url"
+        else
+            print_warning "Attempt $retry failed (HTTP $code)"
         fi
         [ $retry -lt $max_retries ] && sleep 3
     done
-    print_error "Failed to download after $max_retries attempts"
     return 1
 }
 
@@ -250,6 +257,14 @@ install_binary() {
         fi
         print_info "Copying from $LOCAL_BINARY..."
         cp -f "$LOCAL_BINARY" "$binary_path"
+    elif [ -n "$BINARY_URL" ]; then
+        print_info "Downloading from BINARY_URL..."
+        if ! download_with_retry "$BINARY_URL" "/tmp/${BINARY_NAME}-linux-${arch}"; then
+            print_error "Download failed. Check BINARY_URL or use LOCAL_BINARY=/path/to/binary"
+            exit 1
+        fi
+        cp -f "/tmp/${BINARY_NAME}-linux-${arch}" "$binary_path"
+        rm -f "/tmp/${BINARY_NAME}-linux-${arch}"
     else
         local version="$COLLECTOR_VERSION"
         if [ "$version" = "latest" ]; then
@@ -259,7 +274,10 @@ install_binary() {
         local url="https://github.com/${GITHUB_REPO}/releases/download/${version}/${BINARY_NAME}-linux-${arch}"
         print_info "Downloading $url..."
         if ! download_with_retry "$url" "/tmp/${BINARY_NAME}-linux-${arch}"; then
-            print_error "Download failed. Set LOCAL_BINARY=/path/to/binary to install from file."
+            print_error "Download failed."
+            print_info "  1) Create a release with binaries: https://github.com/${GITHUB_REPO}/releases"
+            print_info "  2) Or copy binary to VM and run: LOCAL_BINARY=/path/to/${BINARY_NAME}-linux-${arch} $0"
+            print_info "  3) Or set BINARY_URL to a direct download URL"
             exit 1
         fi
         cp -f "/tmp/${BINARY_NAME}-linux-${arch}" "$binary_path"
