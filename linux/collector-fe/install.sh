@@ -162,7 +162,7 @@ get_user_input() {
     done
 
     while [ -z "$LOKI_URL" ]; do
-        read -p "LOKI_URL (e.g. https://logs-prod-xxx.grafana.net): " LOKI_URL < /dev/tty
+        read -p "LOKI_URL (e.g. https://loki.elvenobservability.com): " LOKI_URL < /dev/tty
         if [ -z "$LOKI_URL" ]; then
             print_error "LOKI_URL cannot be empty"
         fi

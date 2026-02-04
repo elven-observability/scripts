@@ -27,7 +27,7 @@ sudo ./install.sh
 
 ```bash
 sudo SECRET_KEY="your-key-min-32-chars" \
-     LOKI_URL="https://logs-prod-xxx.grafana.net" \
+     LOKI_URL="https://loki.elvenobservability.com" \
      LOKI_API_TOKEN="your-token" \
      ALLOW_ORIGINS="https://app.example.com,https://*.example.com" \
      ./install.sh
@@ -49,28 +49,28 @@ sudo LOCAL_BINARY=/path/to/collector-fe-instrumentation-linux-amd64 ./install.sh
 
 ### Required variables
 
-| Variable         | Required | Description |
-|------------------|----------|-------------|
-| `SECRET_KEY`     | Yes      | Key for JWT validation (min. 32 characters) |
-| `LOKI_URL`       | Yes      | Loki URL (e.g. `https://logs-prod-xxx.grafana.net`) |
-| `LOKI_API_TOKEN` | Yes     | Loki API token |
-| `ALLOW_ORIGINS`  | Yes      | CORS allowed origins (comma-separated) |
+| Variable         | Required | Description                                           |
+| ---------------- | -------- | ----------------------------------------------------- |
+| `SECRET_KEY`     | Yes      | Key for JWT validation (min. 32 characters)           |
+| `LOKI_URL`       | Yes      | Loki URL (e.g. `https://loki.elvenobservability.com`) |
+| `LOKI_API_TOKEN` | Yes      | Loki API token                                        |
+| `ALLOW_ORIGINS`  | Yes      | CORS allowed origins (comma-separated)                |
 
 ### Optional variables
 
-| Variable       | Default       | Description |
-|----------------|---------------|-------------|
-| `PORT`         | 3000          | HTTP port |
-| `JWT_ISSUER`   | trusted-issuer | Expected JWT issuer |
-| `JWT_VALIDATE_EXP` | false     | Validate JWT expiration: true/false |
+| Variable           | Default        | Description                         |
+| ------------------ | -------------- | ----------------------------------- |
+| `PORT`             | 3000           | HTTP port                           |
+| `JWT_ISSUER`       | trusted-issuer | Expected JWT issuer                 |
+| `JWT_VALIDATE_EXP` | false          | Validate JWT expiration: true/false |
 
 ### Installer variables
 
-| Variable           | Description |
-|--------------------|-------------|
-| `LOCAL_BINARY`     | Path to local binary (install without download) |
-| `GITHUB_REPO`      | GitHub repo (default: elven/collector-fe-instrumentation) |
-| `COLLECTOR_VERSION`| Release tag (default: latest) |
+| Variable            | Description                                               |
+| ------------------- | --------------------------------------------------------- |
+| `LOCAL_BINARY`      | Path to local binary (install without download)           |
+| `GITHUB_REPO`       | GitHub repo (default: elven/collector-fe-instrumentation) |
+| `COLLECTOR_VERSION` | Release tag (default: latest)                             |
 
 ## 📂 Installed files
 
@@ -80,13 +80,13 @@ sudo LOCAL_BINARY=/path/to/collector-fe-instrumentation-linux-amd64 ./install.sh
 
 ## ⚡ Quick Reference
 
-| Task            | Command |
-|-----------------|---------|
-| **Install**     | `curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/collector-fe/install.sh \| sudo bash` |
-| **Check Status**| `systemctl status collector-fe-instrumentation` |
-| **Restart**     | `sudo systemctl restart collector-fe-instrumentation` |
-| **Logs**        | `journalctl -u collector-fe-instrumentation -f` |
-| **Health**      | `curl http://localhost:3000/health` |
+| Task             | Command                                                                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **Install**      | `curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/collector-fe/install.sh \| sudo bash` |
+| **Check Status** | `systemctl status collector-fe-instrumentation`                                                                           |
+| **Restart**      | `sudo systemctl restart collector-fe-instrumentation`                                                                     |
+| **Logs**         | `journalctl -u collector-fe-instrumentation -f`                                                                           |
+| **Health**       | `curl http://localhost:3000/health`                                                                                       |
 
 ## 🛠️ Useful commands
 
