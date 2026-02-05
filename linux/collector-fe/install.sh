@@ -218,7 +218,10 @@ get_user_input() {
     fi
 
     # 3. If required vars are missing, check if we can prompt interactively
-    if [ ! -t 0 ]; then
+    # 3. If required vars are missing, check if we can prompt interactively
+    # We check /dev/tty because when running "curl | bash", stdin is the script, not the terminal.
+    # But /dev/tty is still available for user input.
+    if [ ! -c /dev/tty ]; then
         print_error "Non-interactive installation blocked: Missing required environment variables."
         print_error "Please set SECRET_KEY and LOKI_API_TOKEN."
         exit 1
