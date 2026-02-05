@@ -191,25 +191,42 @@ get_user_input() {
     print_info "=== Faro Collector Configuration ==="
     print_info ""
 
-    if [ -n "$SECRET_KEY" ] && [ -n "$LOKI_URL" ] && [ -n "$LOKI_API_TOKEN" ] && [ -n "$ALLOW_ORIGINS" ]; then
+    # 1. Apply Defaults to optional variables
+    LOKI_URL=${LOKI_URL:-"https://loki.elvenobservability.com"}
+    ALLOW_ORIGINS=${ALLOW_ORIGINS:-"*"}
+    PORT=${PORT:-3000}
+    JWT_ISSUER=${JWT_ISSUER:-"trusted-issuer"}
+    JWT_VALIDATE_EXP=${JWT_VALIDATE_EXP:-"false"}
+
+    # 2. Check if we have required variables for auto-install
+    if [ -n "$SECRET_KEY" ] && [ -n "$LOKI_API_TOKEN" ]; then
         print_info "Using environment variables..."
-        PORT=${PORT:-3000}
-        JWT_ISSUER=${JWT_ISSUER:-trusted-issuer}
-        JWT_VALIDATE_EXP=${JWT_VALIDATE_EXP:-false}
+        
         if [ ${#SECRET_KEY} -lt 64 ]; then
             print_error "SECRET_KEY must be at least 64 characters"
             exit 1
         fi
+
         print_success "Configuration loaded from environment"
         echo "  SECRET_KEY:     (set, ${#SECRET_KEY} chars)"
         echo "  LOKI_URL:       $LOKI_URL"
         echo "  LOKI_API_TOKEN: ****"
-        echo "  ALLOW_ORIGINS: $ALLOW_ORIGINS"
-        echo "  PORT:          $PORT"
+        echo "  ALLOW_ORIGINS:  $ALLOW_ORIGINS"
+        echo "  PORT:           $PORT"
         print_info ""
         return 0
     fi
 
+    # 3. If required vars are missing, check if we can prompt interactively
+    if [ ! -t 0 ]; then
+        print_error "Non-interactive installation blocked: Missing required environment variables."
+        print_error "Please set SECRET_KEY and LOKI_API_TOKEN."
+        exit 1
+    fi
+
+    # 4. Interactive Mode
+    print_info "Interactive Setup (press Enter to use defaults)"
+    
     while [ -z "$SECRET_KEY" ]; do
         read -p "SECRET_KEY (min 64 chars, for JWT validation): " SECRET_KEY < /dev/tty
         if [ ${#SECRET_KEY} -lt 64 ]; then
@@ -218,8 +235,11 @@ get_user_input() {
         fi
     done
 
-    read -p "LOKI_URL [default: https://loki.elvenobservability.com]: " LOKI_URL < /dev/tty
-    LOKI_URL=${LOKI_URL:-https://loki.elvenobservability.com}
+    # Show default in prompt, but we already set the variable, so we need to handle that.
+    # Actually, since we set defaults above, we can just display them.
+    
+    read -p "LOKI_URL [default: $LOKI_URL]: " input_loki < /dev/tty
+    [ -n "$input_loki" ] && LOKI_URL="$input_loki"
 
     while [ -z "$LOKI_API_TOKEN" ]; do
         read -sp "LOKI_API_TOKEN: " LOKI_API_TOKEN < /dev/tty
@@ -229,17 +249,17 @@ get_user_input() {
         fi
     done
 
-    read -p "ALLOW_ORIGINS (comma-separated or * for all) [default: *]: " ALLOW_ORIGINS < /dev/tty
-    ALLOW_ORIGINS=${ALLOW_ORIGINS:-*}
+    read -p "ALLOW_ORIGINS (comma-separated or * for all) [default: $ALLOW_ORIGINS]: " input_origins < /dev/tty
+    [ -n "$input_origins" ] && ALLOW_ORIGINS="$input_origins"
 
-    read -p "PORT [default: 3000]: " PORT < /dev/tty
-    PORT=${PORT:-3000}
+    read -p "PORT [default: $PORT]: " input_port < /dev/tty
+    [ -n "$input_port" ] && PORT="$input_port"
 
-    read -p "JWT_ISSUER [default: trusted-issuer]: " JWT_ISSUER < /dev/tty
-    JWT_ISSUER=${JWT_ISSUER:-trusted-issuer}
+    read -p "JWT_ISSUER [default: $JWT_ISSUER]: " input_jwt < /dev/tty
+    [ -n "$input_jwt" ] && JWT_ISSUER="$input_jwt"
 
-    read -p "JWT_VALIDATE_EXP (true/false) [default: false]: " JWT_VALIDATE_EXP < /dev/tty
-    JWT_VALIDATE_EXP=${JWT_VALIDATE_EXP:-false}
+    read -p "JWT_VALIDATE_EXP (true/false) [default: $JWT_VALIDATE_EXP]: " input_exp < /dev/tty
+    [ -n "$input_exp" ] && JWT_VALIDATE_EXP="$input_exp"
 
     print_info ""
     print_success "Configuration summary:"
@@ -371,6 +391,7 @@ EOF
 
 create_systemd_service() {
     print_info "Creating systemd service..."
+    # Use wrapper so env file is always loaded (source + exec); some systemd setups don't load EnvironmentFile.
     cat > "/etc/systemd/system/${SERVICE_NAME}.service" << EOF
 [Unit]
 Description=Faro Collector (Frontend Instrumentation to Loki)
@@ -380,8 +401,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-EnvironmentFile=-$ENV_FILE
-ExecStart=$INSTALL_DIR/$BINARY_NAME
+ExecStart=/bin/bash -c 'set -a; . $ENV_FILE; set +a; exec $INSTALL_DIR/$BINARY_NAME'
 Restart=on-failure
 RestartSec=5
 
