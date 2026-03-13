@@ -197,6 +197,7 @@ get_user_input() {
     PORT=${PORT:-3000}
     JWT_ISSUER=${JWT_ISSUER:-"trusted-issuer"}
     JWT_VALIDATE_EXP=${JWT_VALIDATE_EXP:-"false"}
+    INSTALL_CADDY=${INSTALL_CADDY:-"false"}
 
     # 2. Check if we have required variables for auto-install
     if [ -n "$SECRET_KEY" ] && [ -n "$LOKI_API_TOKEN" ]; then
@@ -213,6 +214,9 @@ get_user_input() {
         echo "  LOKI_API_TOKEN: ****"
         echo "  ALLOW_ORIGINS:  $ALLOW_ORIGINS"
         echo "  PORT:           $PORT"
+        if [ "$INSTALL_CADDY" = "true" ]; then
+            echo "  CADDY PROXY:    Yes (Domain: $CADDY_DOMAIN)"
+        fi
         print_info ""
         return 0
     fi
@@ -264,12 +268,29 @@ get_user_input() {
     read -p "JWT_VALIDATE_EXP (true/false) [default: $JWT_VALIDATE_EXP]: " input_exp < /dev/tty
     [ -n "$input_exp" ] && JWT_VALIDATE_EXP="$input_exp"
 
+    read -p "Install Caddy for Reverse Proxy & Auto SSL (HTTPS)? (y/n) [default: n]: " input_caddy < /dev/tty
+    if [ "$input_caddy" = "y" ] || [ "$input_caddy" = "Y" ]; then
+        INSTALL_CADDY="true"
+        while [ -z "$CADDY_DOMAIN" ]; do
+            read -p "  Enter your domain name (e.g., collector.yourdomain.com): " CADDY_DOMAIN < /dev/tty
+            if [ -z "$CADDY_DOMAIN" ]; then
+                print_error "  Domain cannot be empty if setting up Caddy"
+            fi
+        done
+        print_warning "  Make sure $CADDY_DOMAIN points to this machine's public IP!"
+    else
+        INSTALL_CADDY="false"
+    fi
+
     print_info ""
     print_success "Configuration summary:"
     echo "  LOKI_URL:       $LOKI_URL"
     echo "  LOKI_API_TOKEN: ****"
     echo "  ALLOW_ORIGINS:  $ALLOW_ORIGINS"
     echo "  PORT:           $PORT"
+    if [ "$INSTALL_CADDY" = "true" ]; then
+        echo "  CADDY PROXY:    Yes (Domain: $CADDY_DOMAIN)"
+    fi
     print_info ""
 
     read -p "Continue with installation? (y/n): " CONFIRM < /dev/tty
@@ -449,6 +470,58 @@ start_service() {
     fi
 }
 
+install_caddy() {
+    print_info "=== Installing Caddy (Reverse Proxy & SSL) ==="
+    if command -v caddy &> /dev/null; then
+        print_success "Caddy is already installed"
+        return 0
+    fi
+
+    case $OS in
+        ubuntu|debian)
+            $PKG_UPDATE 2>/dev/null || true
+            $PKG_INSTALL debian-keyring debian-archive-keyring apt-transport-https curl
+            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+            $PKG_UPDATE 2>/dev/null || true
+            $PKG_INSTALL caddy || { print_error "Failed to install Caddy"; exit 1; }
+            ;;
+        rhel|centos|rocky|almalinux|ol|fedora|amzn)
+            if command -v dnf &> /dev/null; then
+                dnf install -y 'dnf-command(copr)' 2>/dev/null || dnf install -y dnf-plugins-core
+                dnf config-manager --add-repo https://dl.cloudsmith.io/public/caddy/stable/rpm.repo
+                dnf install -y caddy || { print_error "Failed to install Caddy"; exit 1; }
+            else
+                yum install -y yum-utils
+                yum-config-manager --add-repo https://dl.cloudsmith.io/public/caddy/stable/rpm.repo
+                yum install -y caddy || { print_error "Failed to install Caddy"; exit 1; }
+            fi
+            ;;
+        *)
+            print_error "Unsupported OS for Caddy auto-install. Please install manually."
+            ;;
+    esac
+    
+    if command -v caddy &> /dev/null; then
+        print_success "Caddy installed successfully"
+    fi
+}
+
+configure_caddy() {
+    print_info "Configuring Caddy for domain: $CADDY_DOMAIN"
+    
+    mkdir -p /etc/caddy
+    cat > /etc/caddy/Caddyfile << EOF
+$CADDY_DOMAIN
+
+reverse_proxy localhost:$PORT
+EOF
+    
+    systemctl enable caddy > /dev/null 2>&1
+    systemctl restart caddy
+    print_success "Caddy configured and started. SSL certificates will be generated automatically."
+}
+
 print_summary() {
     print_info ""
     print_info "========================================"
@@ -465,8 +538,13 @@ print_summary() {
     echo "  Config: $ENV_FILE"
     print_info ""
     print_success "Endpoints:"
-    echo "  Collect: POST http://<host>:${PORT}/collect/:tenant/:token"
-    echo "  Health:  GET  http://<host>:${PORT}/health"
+    if [ "$INSTALL_CADDY" = "true" ]; then
+        echo "  Collect: POST https://${CADDY_DOMAIN}/collect/:tenant/:token"
+        echo "  Health:  GET  https://${CADDY_DOMAIN}/health"
+    else
+        echo "  Collect: POST http://<host>:${PORT}/collect/:tenant/:token"
+        echo "  Health:  GET  http://<host>:${PORT}/health"
+    fi
     print_info ""
     print_info "========================================"
 }
@@ -486,6 +564,10 @@ main() {
     create_systemd_service
     set_selinux_context
     start_service
+    if [ "$INSTALL_CADDY" = "true" ]; then
+        install_caddy
+        configure_caddy
+    fi
     print_summary
 }
 
