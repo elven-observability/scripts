@@ -477,49 +477,90 @@ install_caddy() {
         return 0
     fi
 
-    case $OS in
-        ubuntu|debian)
-            $PKG_UPDATE 2>/dev/null || true
-            $PKG_INSTALL debian-keyring debian-archive-keyring apt-transport-https curl
-            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-            $PKG_UPDATE 2>/dev/null || true
-            $PKG_INSTALL caddy || { print_error "Failed to install Caddy"; exit 1; }
-            ;;
-        rhel|centos|rocky|almalinux|ol|fedora|amzn)
-            if command -v dnf &> /dev/null; then
-                dnf install -y 'dnf-command(copr)' 2>/dev/null || dnf install -y dnf-plugins-core
-                dnf config-manager --add-repo https://dl.cloudsmith.io/public/caddy/stable/rpm.repo
-                dnf install -y caddy || { print_error "Failed to install Caddy"; exit 1; }
-            else
-                yum install -y yum-utils
-                yum-config-manager --add-repo https://dl.cloudsmith.io/public/caddy/stable/rpm.repo
-                yum install -y caddy || { print_error "Failed to install Caddy"; exit 1; }
-            fi
-            ;;
-        *)
-            print_error "Unsupported OS for Caddy auto-install. Please install manually."
-            ;;
-    esac
-    
-    if command -v caddy &> /dev/null; then
-        print_success "Caddy installed successfully"
+    local caddy_arch
+    caddy_arch=$(detect_arch)
+
+    # Fetch latest Caddy version from GitHub API
+    local caddy_version
+    caddy_version=$(curl -sL https://api.github.com/repos/caddyserver/caddy/releases/latest 2>/dev/null | grep -oP '"tag_name":\s*"\K[^"]+' | head -1)
+    if [ -z "$caddy_version" ]; then
+        caddy_version="v2.9.1"
+        print_warning "Could not fetch latest Caddy version, using $caddy_version"
     fi
+    print_info "Caddy version: $caddy_version"
+
+    # Download static binary from GitHub releases
+    local caddy_url="https://github.com/caddyserver/caddy/releases/download/${caddy_version}/caddy_${caddy_version#v}_linux_${caddy_arch}.tar.gz"
+    local caddy_tmp="/tmp/caddy.tar.gz"
+    print_info "Downloading Caddy from GitHub releases..."
+    if ! download_with_retry "$caddy_url" "$caddy_tmp"; then
+        print_error "Failed to download Caddy. URL: $caddy_url"
+        exit 1
+    fi
+
+    # Extract and install
+    tar -xzf "$caddy_tmp" -C /tmp caddy
+    mv /tmp/caddy /usr/local/bin/caddy
+    chmod +x /usr/local/bin/caddy
+    rm -f "$caddy_tmp"
+
+    # Create caddy user/group for systemd
+    if ! id caddy &> /dev/null; then
+        groupadd --system caddy 2>/dev/null || true
+        useradd --system --gid caddy --create-home --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy 2>/dev/null || true
+    fi
+
+    # Create directories
+    mkdir -p /etc/caddy
+    mkdir -p /var/lib/caddy
+    mkdir -p /var/log/caddy
+    chown caddy:caddy /var/lib/caddy
+    chown caddy:caddy /var/log/caddy
+
+    # Create systemd service
+    cat > /etc/systemd/system/caddy.service << 'CADDY_UNIT'
+[Unit]
+Description=Caddy Web Server (Reverse Proxy & Auto SSL)
+Documentation=https://caddyserver.com/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=caddy
+Group=caddy
+ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+CADDY_UNIT
+
+    systemctl daemon-reload
+    print_success "Caddy installed successfully ($(caddy version))"
 }
 
 configure_caddy() {
     print_info "Configuring Caddy for domain: $CADDY_DOMAIN"
-    
-    mkdir -p /etc/caddy
+
     cat > /etc/caddy/Caddyfile << EOF
 $CADDY_DOMAIN
 
 reverse_proxy localhost:$PORT
 EOF
-    
+    chown caddy:caddy /etc/caddy/Caddyfile
+
     systemctl enable caddy > /dev/null 2>&1
     systemctl restart caddy
-    print_success "Caddy configured and started. SSL certificates will be generated automatically."
+    sleep 3
+    if systemctl is-active --quiet caddy; then
+        print_success "Caddy is running. SSL certificate will be generated automatically."
+    else
+        print_warning "Caddy may still be obtaining the SSL certificate. Check: journalctl -u caddy -f"
+    fi
 }
 
 print_summary() {
