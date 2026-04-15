@@ -8,7 +8,7 @@
 # - RHEL/CentOS/Rocky/AlmaLinux/Oracle Linux (yum/dnf)
 # - Amazon Linux 2/2023 (yum/dnf)
 
-set -e
+set -Ee -o pipefail
 
 # Colors
 RED='\033[0;31m'
@@ -19,7 +19,6 @@ NC='\033[0m'
 
 # Versions
 ZABBIX_VERSION="7.0"
-ZABBIX_RELEASE="7.0-2"
 POSTGRES_VERSION="17"
 
 # Directories
@@ -46,6 +45,36 @@ print_info() {
 print_header() {
     echo -e "${CYAN}=== $1 ===${NC}"
 }
+
+handle_error() {
+    local line_no=$1
+    local command=${2:-unknown}
+    print_error "Installation failed at line ${line_no}: ${command}"
+    print_info "Review the output above and, if needed, inspect:"
+    print_info "  journalctl -u zabbix-proxy -u postgresql --no-pager -n 50"
+}
+
+trap 'handle_error "${LINENO}" "${BASH_COMMAND}"' ERR
+
+# Runtime defaults
+ZABBIX_SERVER="${ZABBIX_SERVER:-}"
+PROXY_NAME="${PROXY_NAME:-}"
+DB_PASSWORD="${DB_PASSWORD:-}"
+PROXY_MODE="${PROXY_MODE:-}"
+PERFORMANCE_PROFILE="${PERFORMANCE_PROFILE:-}"
+PROXY_OFFLINE_BUFFER="${PROXY_OFFLINE_BUFFER:-72}"
+PROXY_CONFIG_FREQUENCY="${PROXY_CONFIG_FREQUENCY:-60}"
+DATA_SENDER_FREQUENCY="${DATA_SENDER_FREQUENCY:-5}"
+LISTEN_PORT="${LISTEN_PORT:-10051}"
+LISTEN_IP="${LISTEN_IP:-}"
+SOURCE_IP="${SOURCE_IP:-}"
+TLS_MODE="${TLS_MODE:-unencrypted}"
+TLS_ACCEPT="${TLS_ACCEPT:-unencrypted}"
+TLS_CA_FILE="${TLS_CA_FILE:-}"
+TLS_CERT_FILE="${TLS_CERT_FILE:-}"
+TLS_KEY_FILE="${TLS_KEY_FILE:-}"
+TLS_PSK_IDENTITY="${TLS_PSK_IDENTITY:-}"
+TLS_PSK_FILE="${TLS_PSK_FILE:-}"
 
 # Check root
 check_root() {
@@ -95,9 +124,15 @@ detect_distro() {
             POSTGRES_CONF_DIR="/var/lib/pgsql/${POSTGRES_VERSION}/data"
             ;;
         amzn)
-            PKG_MANAGER="yum"
-            PKG_UPDATE="yum check-update || true"
-            PKG_INSTALL="yum install -y"
+            if command -v dnf &> /dev/null; then
+                PKG_MANAGER="dnf"
+                PKG_UPDATE="dnf check-update || true"
+                PKG_INSTALL="dnf install -y"
+            else
+                PKG_MANAGER="yum"
+                PKG_UPDATE="yum check-update || true"
+                PKG_INSTALL="yum install -y"
+            fi
             POSTGRES_CONF_DIR="/var/lib/pgsql/${POSTGRES_VERSION}/data"
             ;;
         *)
@@ -119,14 +154,21 @@ download_with_retry() {
     while [ $retry -lt $max_retries ]; do
         retry=$((retry + 1))
         echo "  Attempt $retry of $max_retries..."
-        
-        if curl -L -f -o "$output" "$url" 2>/dev/null; then
-            if [ -f "$output" ] && [ -s "$output" ]; then
-                print_success "Download complete!"
-                return 0
-            fi
+
+        if command -v curl >/dev/null 2>&1; then
+            curl -L -f -o "$output" "$url" 2>/dev/null || true
+        elif command -v wget >/dev/null 2>&1; then
+            wget -q -O "$output" "$url" 2>/dev/null || true
+        else
+            print_error "Neither curl nor wget is available for downloads"
+            return 1
         fi
-        
+
+        if [ -f "$output" ] && [ -s "$output" ]; then
+            print_success "Download complete!"
+            return 0
+        fi
+
         print_warning "Attempt $retry failed"
         [ $retry -lt $max_retries ] && sleep 3
     done
@@ -137,14 +179,172 @@ download_with_retry() {
 
 # Get memory in GB
 get_memory_gb() {
-    local mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    local mem_gb=$((mem_kb / 1024 / 1024))
-    echo $mem_gb
+    local mem_kb
+    local mem_gb
+
+    mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    mem_gb=$((mem_kb / 1024 / 1024))
+    [ "$mem_gb" -lt 1 ] && mem_gb=1
+    echo "$mem_gb"
 }
 
 # Get CPU count
 get_cpu_count() {
     nproc
+}
+
+is_integer() {
+    [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+validate_int_range() {
+    local field_name=$1
+    local value=$2
+    local min_value=$3
+    local max_value=$4
+
+    if ! is_integer "$value"; then
+        print_error "${field_name} must be an integer (current value: ${value})"
+        exit 1
+    fi
+
+    if [ "$value" -lt "$min_value" ] || [ "$value" -gt "$max_value" ]; then
+        print_error "${field_name} must be between ${min_value} and ${max_value} (current value: ${value})"
+        exit 1
+    fi
+}
+
+mode_name() {
+    [ "$1" -eq 0 ] && echo "Active" || echo "Passive"
+}
+
+server_label() {
+    [ "$PROXY_MODE" -eq 0 ] && echo "Server/Cluster" || echo "Allowed Server(s)"
+}
+
+server_prompt() {
+    if [ "$PROXY_MODE" -eq 0 ]; then
+        echo "Zabbix Server/Cluster endpoint [e.g. zbx.example.com:10051 or zbx-a:10051;zbx-b:10051]: "
+    else
+        echo "Authorized Zabbix Server IP/CIDR/DNS list [e.g. 10.10.10.5,10.10.20.0/24,zbx.example.com]: "
+    fi
+}
+
+escape_sql_literal() {
+    printf "%s" "$1" | sed "s/'/''/g"
+}
+
+validate_tls_configuration() {
+    case "$TLS_MODE" in
+        unencrypted|psk|cert)
+            ;;
+        *)
+            print_error "TLS_MODE must be one of: unencrypted, psk, cert"
+            exit 1
+            ;;
+    esac
+
+    if [ "$TLS_MODE" = "psk" ]; then
+        [ -n "$TLS_PSK_IDENTITY" ] || { print_error "TLS_PSK_IDENTITY is required when TLS_MODE=psk"; exit 1; }
+        [ -n "$TLS_PSK_FILE" ] || { print_error "TLS_PSK_FILE is required when TLS_MODE=psk"; exit 1; }
+    fi
+
+    if [ "$TLS_MODE" = "cert" ]; then
+        [ -n "$TLS_CA_FILE" ] || { print_error "TLS_CA_FILE is required when TLS_MODE=cert"; exit 1; }
+        [ -n "$TLS_CERT_FILE" ] || { print_error "TLS_CERT_FILE is required when TLS_MODE=cert"; exit 1; }
+        [ -n "$TLS_KEY_FILE" ] || { print_error "TLS_KEY_FILE is required when TLS_MODE=cert"; exit 1; }
+    fi
+}
+
+validate_configuration() {
+    [ -n "$PROXY_NAME" ] || PROXY_NAME=$(hostname)
+    [ -n "$PROXY_MODE" ] || PROXY_MODE=0
+    [ -n "$PERFORMANCE_PROFILE" ] || PERFORMANCE_PROFILE="medium"
+
+    validate_int_range "PROXY_MODE" "$PROXY_MODE" 0 1
+    validate_int_range "PROXY_OFFLINE_BUFFER" "$PROXY_OFFLINE_BUFFER" 1 720
+    validate_int_range "PROXY_CONFIG_FREQUENCY" "$PROXY_CONFIG_FREQUENCY" 1 604800
+    validate_int_range "DATA_SENDER_FREQUENCY" "$DATA_SENDER_FREQUENCY" 1 3600
+    validate_int_range "LISTEN_PORT" "$LISTEN_PORT" 1024 32767
+
+    case "$PERFORMANCE_PROFILE" in
+        light|medium|heavy|ultra)
+            ;;
+        *)
+            print_error "PERFORMANCE_PROFILE must be one of: light, medium, heavy, ultra"
+            exit 1
+            ;;
+    esac
+
+    if [ -z "$ZABBIX_SERVER" ]; then
+        print_error "ZABBIX_SERVER cannot be empty"
+        exit 1
+    fi
+
+    if [ -z "$DB_PASSWORD" ]; then
+        print_error "DB_PASSWORD cannot be empty"
+        exit 1
+    fi
+
+    if [ "${#DB_PASSWORD}" -lt 8 ]; then
+        print_error "DB_PASSWORD must be at least 8 characters"
+        exit 1
+    fi
+
+    if [ "$PROXY_MODE" -eq 0 ] && printf '%s' "$ZABBIX_SERVER" | grep -q ','; then
+        print_error "Active mode expects a single endpoint or cluster separated by ';' (not commas)"
+        exit 1
+    fi
+
+    if [ "$PROXY_MODE" -eq 1 ] && printf '%s' "$ZABBIX_SERVER" | grep -q ';'; then
+        print_error "Passive mode expects a comma-delimited IP/CIDR/DNS list (not ';')"
+        exit 1
+    fi
+
+    validate_tls_configuration
+}
+
+build_tls_config() {
+    cat <<EOF
+# TLS
+TLSConnect=${TLS_MODE}
+TLSAccept=${TLS_ACCEPT}
+EOF
+
+    [ -n "$TLS_CA_FILE" ] && echo "TLSCAFile=${TLS_CA_FILE}"
+    [ -n "$TLS_CERT_FILE" ] && echo "TLSCertFile=${TLS_CERT_FILE}"
+    [ -n "$TLS_KEY_FILE" ] && echo "TLSKeyFile=${TLS_KEY_FILE}"
+    [ -n "$TLS_PSK_IDENTITY" ] && echo "TLSPSKIdentity=${TLS_PSK_IDENTITY}"
+    [ -n "$TLS_PSK_FILE" ] && echo "TLSPSKFile=${TLS_PSK_FILE}"
+}
+
+show_mode_guidance() {
+    print_info "Recommended usage:"
+    print_info "  Active  = use when the proxy can reach the central Zabbix server, but the server cannot open inbound connections to the site."
+    print_info "  Passive = use when the Zabbix server can initiate TCP/10051 towards the proxy."
+    print_info ""
+    print_warning "Zabbix documents that active proxy configuration requests are not authenticated on the server trapper port."
+    print_warning "Do not expose the Zabbix server trapper port broadly on the Internet; protect it with ACLs / firewalls / private links."
+}
+
+get_zabbix_repo_url() {
+    local arch
+    arch=$(uname -m)
+
+    case "$OS" in
+        ubuntu)
+            echo "https://repo.zabbix.com/zabbix/${ZABBIX_VERSION}/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_${ZABBIX_VERSION}+ubuntu${VERSION}_all.deb"
+            ;;
+        debian)
+            echo "https://repo.zabbix.com/zabbix/${ZABBIX_VERSION}/debian/pool/main/z/zabbix-release/zabbix-release_latest_${ZABBIX_VERSION}+debian${VERSION%%.*}_all.deb"
+            ;;
+        amzn)
+            echo "https://repo.zabbix.com/zabbix/${ZABBIX_VERSION}/amazonlinux/${VERSION%%.*}/${arch}/zabbix-release-latest-${ZABBIX_VERSION}.amzn${VERSION%%.*}.noarch.rpm"
+            ;;
+        rhel|centos|rocky|almalinux|ol|fedora)
+            echo "https://repo.zabbix.com/zabbix/${ZABBIX_VERSION}/rhel/$(rpm -E %{rhel})/${arch}/zabbix-release-latest-${ZABBIX_VERSION}.el$(rpm -E %{rhel}).noarch.rpm"
+            ;;
+    esac
 }
 
 # Get user input
@@ -154,29 +354,22 @@ get_user_input() {
     print_info ""
 
     # Check for env vars (non-interactive mode)
-    if [ -n "$ZABBIX_SERVER" ] && [ -n "$PROXY_NAME" ] && [ -n "$DB_PASSWORD" ]; then
+    if [ -n "$ZABBIX_SERVER" ] && [ -n "$DB_PASSWORD" ]; then
         print_info "Using environment variables for configuration..."
-        
-        PROXY_MODE=${PROXY_MODE:-0}
-        PERFORMANCE_PROFILE=${PERFORMANCE_PROFILE:-medium}
-        
+
+        validate_configuration
+
         print_success "Configuration loaded:"
-        echo "  Zabbix Server:  $ZABBIX_SERVER"
+        echo "  $(server_label):  $ZABBIX_SERVER"
         echo "  Proxy Name:     $PROXY_NAME"
-        echo "  Proxy Mode:     $([ $PROXY_MODE -eq 0 ] && echo 'Active' || echo 'Passive')"
+        echo "  Proxy Mode:     $(mode_name "$PROXY_MODE")"
         echo "  Performance:    $PERFORMANCE_PROFILE"
+        echo "  Offline Buffer: ${PROXY_OFFLINE_BUFFER}h"
+        echo "  Listen Port:    ${LISTEN_PORT}"
         print_info ""
-        
+
         return 0
     fi
-
-    # Zabbix Server
-    while [ -z "$ZABBIX_SERVER" ]; do
-        read -p "Zabbix Server IP/Hostname: " ZABBIX_SERVER < /dev/tty
-        if [ -z "$ZABBIX_SERVER" ]; then
-            print_error "Zabbix Server cannot be empty!"
-        fi
-    done
 
     # Proxy Name
     read -p "Proxy Name [default: $(hostname)]: " PROXY_NAME < /dev/tty
@@ -187,6 +380,8 @@ get_user_input() {
 
     # Proxy Mode
     print_info ""
+    show_mode_guidance
+    print_info ""
     print_info "Proxy Mode:"
     echo "  0 = Active (proxy connects to server)"
     echo "  1 = Passive (server connects to proxy)"
@@ -195,6 +390,16 @@ get_user_input() {
         PROXY_MODE=0
         print_info "  → Using Active mode"
     fi
+
+    validate_int_range "PROXY_MODE" "$PROXY_MODE" 0 1
+
+    # Zabbix Server / Allowed servers
+    while [ -z "$ZABBIX_SERVER" ]; do
+        read -p "$(server_prompt)" ZABBIX_SERVER < /dev/tty
+        if [ -z "$ZABBIX_SERVER" ]; then
+            print_error "$(server_label) cannot be empty!"
+        fi
+    done
 
     # Database Password
     while [ -z "$DB_PASSWORD" ]; do
@@ -231,12 +436,16 @@ get_user_input() {
             ;;
     esac
 
+    validate_configuration
+
     print_info ""
     print_success "Configuration summary:"
-    echo "  Zabbix Server:  $ZABBIX_SERVER"
+    echo "  $(server_label):  $ZABBIX_SERVER"
     echo "  Proxy Name:     $PROXY_NAME"
-    echo "  Proxy Mode:     $([ $PROXY_MODE -eq 0 ] && echo 'Active' || echo 'Passive')"
+    echo "  Proxy Mode:     $(mode_name "$PROXY_MODE")"
     echo "  Performance:    $PERFORMANCE_PROFILE"
+    echo "  Offline Buffer: ${PROXY_OFFLINE_BUFFER}h"
+    echo "  Listen Port:    ${LISTEN_PORT}"
     print_info ""
 
     read -p "Confirm and continue? (y/n): " CONFIRM < /dev/tty
@@ -365,12 +574,15 @@ install_postgresql() {
     print_header "[1/3] Installing PostgreSQL $POSTGRES_VERSION"
     print_info ""
 
+    local pgdg_repo_rpm_url
+    local pgdg_repo_rpm_file="/tmp/pgdg-redhat-repo-latest.noarch.rpm"
+
     case $OS in
         ubuntu|debian)
             print_info "Adding PostgreSQL repository..."
             
             # Install prerequisites
-            $PKG_INSTALL wget ca-certificates gnupg lsb-release > /dev/null 2>&1
+            $PKG_INSTALL wget curl ca-certificates gnupg lsb-release > /dev/null 2>&1
             
             # Add PostgreSQL GPG key
             wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg
@@ -388,13 +600,13 @@ install_postgresql() {
             
         rhel|centos|rocky|almalinux|ol|fedora|amzn)
             print_info "Adding PostgreSQL repository..."
-            
-            # Install repository RPM
-            if [ "$OS" = "amzn" ]; then
-                $PKG_INSTALL https://download.postgresql.org/pub/repos/yum/reporpms/EL-$(rpm -E %{rhel})-x86_64/pgdg-redhat-repo-latest.noarch.rpm > /dev/null 2>&1 || true
-            else
-                $PKG_INSTALL https://download.postgresql.org/pub/repos/yum/reporpms/EL-$(rpm -E %{rhel})-x86_64/pgdg-redhat-repo-latest.noarch.rpm > /dev/null 2>&1
-            fi
+
+            # Install repository RPM locally instead of asking dnf/yum to fetch a remote URL.
+            # This is lighter on constrained hosts and avoids opaque "Killed" failures from the package manager.
+            pgdg_repo_rpm_url="https://download.postgresql.org/pub/repos/yum/reporpms/EL-$(rpm -E %{rhel})-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+            download_with_retry "$pgdg_repo_rpm_url" "$pgdg_repo_rpm_file"
+            rpm -Uvh --quiet "$pgdg_repo_rpm_file"
+            rm -f "$pgdg_repo_rpm_file"
             
             # Disable built-in PostgreSQL module (RHEL 8+)
             if [ "$PKG_MANAGER" = "dnf" ]; then
@@ -446,12 +658,13 @@ configure_postgresql() {
     fi
     
     # Backup original config
-    cp $PG_CONF ${PG_CONF}.backup
-    
-    # Apply tuning
-    cat >> $PG_CONF <<EOF
+    cp "$PG_CONF" "${PG_CONF}.backup"
 
-# Zabbix Proxy Tuning - Added by installation script
+    # Apply tuning idempotently
+    sed -i '/^# BEGIN ELVEN ZABBIX PROXY TUNING$/,/^# END ELVEN ZABBIX PROXY TUNING$/d' "$PG_CONF"
+    cat >> "$PG_CONF" <<EOF
+
+# BEGIN ELVEN ZABBIX PROXY TUNING
 max_connections = 200
 shared_buffers = ${PG_SHARED_BUFFERS}
 effective_cache_size = ${PG_EFFECTIVE_CACHE_SIZE}
@@ -468,6 +681,7 @@ max_worker_processes = $(get_cpu_count)
 max_parallel_workers_per_gather = 2
 max_parallel_workers = $(get_cpu_count)
 max_parallel_maintenance_workers = 2
+# END ELVEN ZABBIX PROXY TUNING
 EOF
 
     # Restart PostgreSQL
@@ -481,13 +695,32 @@ EOF
 create_database() {
     print_info ""
     print_info "Creating Zabbix database and user..."
-    
-    # Create user and database
-    sudo -u postgres psql -c "CREATE USER zabbix WITH PASSWORD '$DB_PASSWORD';" > /dev/null 2>&1 || print_warning "User zabbix already exists"
-    sudo -u postgres psql -c "CREATE DATABASE zabbix_proxy OWNER zabbix;" > /dev/null 2>&1 || print_warning "Database zabbix_proxy already exists"
+
+    local escaped_db_password
+    escaped_db_password=$(escape_sql_literal "$DB_PASSWORD")
+
+    sudo -u postgres psql -v ON_ERROR_STOP=1 >/dev/null <<EOF
+DO \$\$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zabbix') THEN
+        ALTER ROLE zabbix WITH PASSWORD '${escaped_db_password}';
+    ELSE
+        CREATE ROLE zabbix LOGIN PASSWORD '${escaped_db_password}';
+    END IF;
+END
+\$\$;
+EOF
+
+    if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='zabbix_proxy'" | grep -q 1; then
+        sudo -u postgres createdb -O zabbix zabbix_proxy
+    else
+        print_warning "Database zabbix_proxy already exists"
+    fi
+
+    sudo -u postgres psql -d zabbix_proxy -c "ALTER SCHEMA public OWNER TO zabbix;" > /dev/null 2>&1 || true
     sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE zabbix_proxy TO zabbix;" > /dev/null 2>&1
-    
-    print_success "Database created!"
+
+    print_success "Database and user ready!"
 }
 
 # Install Zabbix Proxy
@@ -499,17 +732,11 @@ install_zabbix() {
     case $OS in
         ubuntu|debian)
             print_info "Adding Zabbix repository..."
-            
-            # Determine Debian/Ubuntu codename
-            CODENAME=$(lsb_release -cs)
-            
-            # Download and install repository package
-            local repo_url="https://repo.zabbix.com/zabbix/${ZABBIX_VERSION}/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_${CODENAME}_all.deb"
-            if [ "$OS" = "debian" ]; then
-                repo_url="https://repo.zabbix.com/zabbix/${ZABBIX_VERSION}/debian/pool/main/z/zabbix-release/zabbix-release_latest_${CODENAME}_all.deb"
-            fi
-            
-            wget -q $repo_url -O /tmp/zabbix-release.deb
+
+            local repo_url
+            repo_url=$(get_zabbix_repo_url)
+
+            download_with_retry "$repo_url" /tmp/zabbix-release.deb
             dpkg -i /tmp/zabbix-release.deb > /dev/null 2>&1
             rm /tmp/zabbix-release.deb
             
@@ -523,10 +750,10 @@ install_zabbix() {
             
         rhel|centos|rocky|almalinux|ol|fedora|amzn)
             print_info "Adding Zabbix repository..."
-            
-            # Install repository
-            local rhel_version=$(rpm -E %{rhel})
-            rpm -Uvh https://repo.zabbix.com/zabbix/${ZABBIX_VERSION}/rhel/${rhel_version}/x86_64/zabbix-release-${ZABBIX_RELEASE}.el${rhel_version}.noarch.rpm > /dev/null 2>&1
+
+            local repo_url
+            repo_url=$(get_zabbix_repo_url)
+            rpm -Uvh "$repo_url" > /dev/null 2>&1
             
             # Clean cache
             $PKG_MANAGER clean all > /dev/null 2>&1
@@ -560,7 +787,7 @@ import_schema() {
     sudo -u postgres psql -d zabbix_proxy -c "\dt" | grep -q "hosts" && {
         print_warning "Schema already imported, skipping"
     } || {
-        cat $SCHEMA_FILE | sudo -u zabbix psql zabbix_proxy > /dev/null 2>&1
+        sudo -u zabbix psql zabbix_proxy < "$SCHEMA_FILE" > /dev/null 2>&1
         print_success "Schema imported!"
     }
     
@@ -575,10 +802,10 @@ configure_zabbix() {
     print_info ""
 
     # Backup original config
-    [ -f $ZABBIX_CONF ] && cp $ZABBIX_CONF ${ZABBIX_CONF}.backup
+    [ -f "$ZABBIX_CONF" ] && cp "$ZABBIX_CONF" "${ZABBIX_CONF}.backup"
 
     # Create configuration
-    cat > $ZABBIX_CONF <<EOF
+    cat > "$ZABBIX_CONF" <<EOF
 # Zabbix Proxy Configuration
 # Auto-generated by installation script
 
@@ -613,8 +840,9 @@ TrendCacheSize=${TREND_CACHE_SIZE}
 ValueCacheSize=${VALUE_CACHE_SIZE}
 
 # Data Transfer
-ConfigFrequency=60
-DataSenderFrequency=5
+ProxyConfigFrequency=${PROXY_CONFIG_FREQUENCY}
+DataSenderFrequency=${DATA_SENDER_FREQUENCY}
+ProxyOfflineBuffer=${PROXY_OFFLINE_BUFFER}
 
 # Logging
 LogFile=/var/log/zabbix/zabbix_proxy.log
@@ -629,8 +857,8 @@ VMwareCacheSize=8M
 VMwareTimeout=10
 
 # Network
-ListenPort=10051
-SourceIP=
+ListenPort=${LISTEN_PORT}
+SourceIP=${SOURCE_IP}
 
 # Other
 SNMPTrapperFile=/var/log/snmptrap/snmptrap.log
@@ -640,27 +868,25 @@ Fping6Location=/usr/bin/fping6
 SSHKeyLocation=
 LogSlowQueries=3000
 
-# TLS (optional - configure as needed)
-# TLSConnect=unencrypted
-# TLSAccept=unencrypted
-# TLSCAFile=
-# TLSCertFile=
-# TLSKeyFile=
-# TLSPSKIdentity=
-# TLSPSKFile=
-
 # StatsAllowedIP=127.0.0.1
 EOF
+
+    if [ -n "$LISTEN_IP" ]; then
+        echo "ListenIP=${LISTEN_IP}" >> "$ZABBIX_CONF"
+    fi
+
+    build_tls_config >> "$ZABBIX_CONF"
 
     print_success "Configuration created!"
     
     # Set permissions
-    chown zabbix:zabbix $ZABBIX_CONF
-    chmod 640 $ZABBIX_CONF
+    chown zabbix:zabbix "$ZABBIX_CONF"
+    chmod 640 "$ZABBIX_CONF"
     
     # Create log directory if needed
     mkdir -p /var/log/zabbix
     chown zabbix:zabbix /var/log/zabbix
+    mkdir -p /var/log/snmptrap
 }
 
 # Start Zabbix Proxy
@@ -678,7 +904,11 @@ start_zabbix() {
     else
         print_error "Zabbix Proxy failed to start"
         print_info "Checking logs..."
-        tail -n 30 /var/log/zabbix/zabbix_proxy.log
+        if [ -f /var/log/zabbix/zabbix_proxy.log ]; then
+            tail -n 30 /var/log/zabbix/zabbix_proxy.log
+        else
+            journalctl -u zabbix-proxy -n 30 --no-pager
+        fi
         exit 1
     fi
 }
@@ -707,10 +937,12 @@ print_summary() {
 
     print_info ""
     print_success "Configuration:"
-    echo "  Zabbix Server:   $ZABBIX_SERVER"
+    echo "  $(server_label):  $ZABBIX_SERVER"
     echo "  Proxy Name:      $PROXY_NAME"
-    echo "  Proxy Mode:      $([ $PROXY_MODE -eq 0 ] && echo 'Active' || echo 'Passive')"
+    echo "  Proxy Mode:      $(mode_name "$PROXY_MODE")"
     echo "  Performance:     $PERFORMANCE_PROFILE"
+    echo "  Offline Buffer:  ${PROXY_OFFLINE_BUFFER}h"
+    echo "  Listen Port:     ${LISTEN_PORT}"
     echo "  Distribution:    $OS_NAME"
     
     print_info ""
@@ -754,9 +986,13 @@ print_summary() {
     echo "  1. Go to Zabbix Server web interface"
     echo "  2. Administration → Proxies → Create proxy"
     echo "  3. Set proxy name to: $PROXY_NAME"
-    echo "  4. Set proxy mode to: $([ $PROXY_MODE -eq 0 ] && echo 'Active' || echo 'Passive')"
-    if [ $PROXY_MODE -eq 1 ]; then
-        echo "  5. For Passive mode, configure firewall to allow port 10051"
+    echo "  4. Set proxy mode to: $(mode_name "$PROXY_MODE")"
+    if [ "$PROXY_MODE" -eq 0 ]; then
+        echo "  5. Ensure the proxy can initiate TCP/${LISTEN_PORT} to: $ZABBIX_SERVER"
+        echo "  6. Protect the Zabbix server trapper port with network ACLs / VPN / private connectivity"
+    else
+        echo "  5. Ensure the Zabbix server can initiate TCP/${LISTEN_PORT} to this proxy"
+        echo "  6. Allow only the server IPs/CIDRs declared in Server=${ZABBIX_SERVER}"
     fi
     
     print_info ""
