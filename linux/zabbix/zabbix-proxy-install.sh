@@ -49,6 +49,11 @@ print_header() {
 handle_error() {
     local line_no=$1
     local command=${2:-unknown}
+
+    if [ "$POSTGRES_STOPPED_FOR_ZABBIX_INSTALL" = "true" ]; then
+        systemctl start postgresql-${POSTGRES_VERSION} > /dev/null 2>&1 || systemctl start postgresql > /dev/null 2>&1 || true
+    fi
+
     print_error "Installation failed at line ${line_no}: ${command}"
     print_info "Review the output above and, if needed, inspect:"
     print_info "  journalctl -u zabbix-proxy -u postgresql --no-pager -n 50"
@@ -75,6 +80,12 @@ TLS_CERT_FILE="${TLS_CERT_FILE:-}"
 TLS_KEY_FILE="${TLS_KEY_FILE:-}"
 TLS_PSK_IDENTITY="${TLS_PSK_IDENTITY:-}"
 TLS_PSK_FILE="${TLS_PSK_FILE:-}"
+AUTO_CREATE_SWAP="${AUTO_CREATE_SWAP:-auto}"
+SWAP_FILE_PATH="${SWAP_FILE_PATH:-/swapfile.elven-zabbix-installer}"
+SWAP_SIZE_MB="${SWAP_SIZE_MB:-2048}"
+LOW_MEMORY_THRESHOLD_MB="${LOW_MEMORY_THRESHOLD_MB:-2048}"
+TEMP_SWAP_ENABLED="false"
+POSTGRES_STOPPED_FOR_ZABBIX_INSTALL="false"
 
 # Check root
 check_root() {
@@ -109,7 +120,7 @@ detect_distro() {
             if command -v dnf &> /dev/null; then
                 PKG_MANAGER="dnf"
                 PKG_UPDATE="dnf check-update || true"
-                PKG_INSTALL="dnf install -y"
+                PKG_INSTALL="dnf install -y --setopt=install_weak_deps=False --setopt=max_parallel_downloads=1 --setopt=keepcache=0"
             else
                 PKG_MANAGER="yum"
                 PKG_UPDATE="yum check-update || true"
@@ -120,14 +131,14 @@ detect_distro() {
         fedora)
             PKG_MANAGER="dnf"
             PKG_UPDATE="dnf check-update || true"
-            PKG_INSTALL="dnf install -y"
+            PKG_INSTALL="dnf install -y --setopt=install_weak_deps=False --setopt=max_parallel_downloads=1 --setopt=keepcache=0"
             POSTGRES_CONF_DIR="/var/lib/pgsql/${POSTGRES_VERSION}/data"
             ;;
         amzn)
             if command -v dnf &> /dev/null; then
                 PKG_MANAGER="dnf"
                 PKG_UPDATE="dnf check-update || true"
-                PKG_INSTALL="dnf install -y"
+                PKG_INSTALL="dnf install -y --setopt=install_weak_deps=False --setopt=max_parallel_downloads=1 --setopt=keepcache=0"
             else
                 PKG_MANAGER="yum"
                 PKG_UPDATE="yum check-update || true"
@@ -188,9 +199,96 @@ get_memory_gb() {
     echo "$mem_gb"
 }
 
+get_memory_mb() {
+    awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo
+}
+
+get_swap_mb() {
+    awk '/SwapTotal/ {print int($2 / 1024)}' /proc/meminfo
+}
+
 # Get CPU count
 get_cpu_count() {
     nproc
+}
+
+is_low_memory_host() {
+    [ "$(get_memory_mb)" -lt "$LOW_MEMORY_THRESHOLD_MB" ]
+}
+
+ensure_runtime_swap() {
+    local memory_mb
+    local swap_mb
+
+    memory_mb=$(get_memory_mb)
+    swap_mb=$(get_swap_mb)
+
+    case "$AUTO_CREATE_SWAP" in
+        false|no|0)
+            return 0
+            ;;
+    esac
+
+    if [ "$memory_mb" -ge "$LOW_MEMORY_THRESHOLD_MB" ] || [ "$swap_mb" -ge 1024 ]; then
+        return 0
+    fi
+
+    print_warning "Low-memory host detected (${memory_mb}MB RAM, ${swap_mb}MB swap). Enabling temporary swap to protect package installs."
+
+    if swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$SWAP_FILE_PATH"; then
+        TEMP_SWAP_ENABLED="true"
+        return 0
+    fi
+
+    if [ ! -f "$SWAP_FILE_PATH" ]; then
+        if command -v fallocate >/dev/null 2>&1; then
+            fallocate -l "${SWAP_SIZE_MB}M" "$SWAP_FILE_PATH" 2>/dev/null || dd if=/dev/zero of="$SWAP_FILE_PATH" bs=1M count="$SWAP_SIZE_MB" status=none
+        else
+            dd if=/dev/zero of="$SWAP_FILE_PATH" bs=1M count="$SWAP_SIZE_MB" status=none
+        fi
+    fi
+
+    chmod 600 "$SWAP_FILE_PATH"
+    mkswap -f "$SWAP_FILE_PATH" > /dev/null 2>&1 || {
+        print_warning "Unable to initialize swap file at $SWAP_FILE_PATH. Package installs may still fail on low-memory hosts."
+        return 0
+    }
+
+    if swapon "$SWAP_FILE_PATH" > /dev/null 2>&1; then
+        TEMP_SWAP_ENABLED="true"
+        print_success "Temporary swap enabled at $SWAP_FILE_PATH (${SWAP_SIZE_MB}MB)"
+    else
+        print_warning "Unable to activate swap file at $SWAP_FILE_PATH. Package installs may still fail on low-memory hosts."
+    fi
+}
+
+pause_postgresql_for_low_memory_install() {
+    if ! is_low_memory_host; then
+        return 0
+    fi
+
+    if systemctl is-active --quiet postgresql-${POSTGRES_VERSION} 2>/dev/null; then
+        print_warning "Low-memory host detected. Temporarily stopping PostgreSQL before Zabbix package installation."
+        systemctl stop postgresql-${POSTGRES_VERSION}
+        POSTGRES_STOPPED_FOR_ZABBIX_INSTALL="true"
+        return 0
+    fi
+
+    if systemctl is-active --quiet postgresql 2>/dev/null; then
+        print_warning "Low-memory host detected. Temporarily stopping PostgreSQL before Zabbix package installation."
+        systemctl stop postgresql
+        POSTGRES_STOPPED_FOR_ZABBIX_INSTALL="true"
+    fi
+}
+
+resume_postgresql_after_low_memory_install() {
+    if [ "$POSTGRES_STOPPED_FOR_ZABBIX_INSTALL" != "true" ]; then
+        return 0
+    fi
+
+    print_info "Restarting PostgreSQL after Zabbix package installation..."
+    systemctl start postgresql-${POSTGRES_VERSION} > /dev/null 2>&1 || systemctl start postgresql > /dev/null 2>&1
+    POSTGRES_STOPPED_FOR_ZABBIX_INSTALL="false"
 }
 
 is_integer() {
@@ -729,6 +827,8 @@ install_zabbix() {
     print_header "[2/3] Installing Zabbix Proxy ${ZABBIX_VERSION} LTS"
     print_info ""
 
+    pause_postgresql_for_low_memory_install
+
     case $OS in
         ubuntu|debian)
             print_info "Adding Zabbix repository..."
@@ -743,7 +843,8 @@ install_zabbix() {
             # Update and install
             print_info "Installing Zabbix Proxy..."
             $PKG_UPDATE > /dev/null 2>&1
-            $PKG_INSTALL zabbix-proxy-pgsql zabbix-sql-scripts > /dev/null 2>&1
+            $PKG_INSTALL zabbix-proxy-pgsql > /dev/null 2>&1
+            $PKG_INSTALL zabbix-sql-scripts > /dev/null 2>&1
             
             print_success "Zabbix Proxy installed!"
             ;;
@@ -760,11 +861,14 @@ install_zabbix() {
             
             # Install
             print_info "Installing Zabbix Proxy..."
-            $PKG_INSTALL zabbix-proxy-pgsql zabbix-sql-scripts > /dev/null 2>&1
+            $PKG_INSTALL zabbix-proxy-pgsql > /dev/null 2>&1
+            $PKG_INSTALL zabbix-sql-scripts > /dev/null 2>&1
             
             print_success "Zabbix Proxy installed!"
             ;;
     esac
+
+    resume_postgresql_after_low_memory_install
 }
 
 # Import Zabbix schema
@@ -944,6 +1048,9 @@ print_summary() {
     echo "  Offline Buffer:  ${PROXY_OFFLINE_BUFFER}h"
     echo "  Listen Port:     ${LISTEN_PORT}"
     echo "  Distribution:    $OS_NAME"
+    if [ "$TEMP_SWAP_ENABLED" = "true" ]; then
+        echo "  Temporary Swap:  ${SWAP_FILE_PATH} (${SWAP_SIZE_MB}MB)"
+    fi
     
     print_info ""
     print_success "Files:"
@@ -1009,6 +1116,7 @@ main() {
     detect_distro
     get_user_input
     get_performance_params "$PERFORMANCE_PROFILE"
+    ensure_runtime_swap
     stop_existing_services
     install_postgresql
     configure_postgresql
