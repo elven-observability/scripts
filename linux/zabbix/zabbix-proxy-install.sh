@@ -56,7 +56,7 @@ handle_error() {
 
     print_error "Installation failed at line ${line_no}: ${command}"
     print_info "Review the output above and, if needed, inspect:"
-    print_info "  journalctl -u zabbix-proxy -u postgresql --no-pager -n 50"
+    print_info "  journalctl -u zabbix-proxy -u postgresql-${POSTGRES_VERSION} -u postgresql --no-pager -n 50"
 }
 
 trap 'handle_error "${LINENO}" "${BASH_COMMAND}"' ERR
@@ -95,6 +95,24 @@ check_root() {
     fi
 }
 
+run_as_user() {
+    local target_user=$1
+    shift
+
+    if command -v runuser >/dev/null 2>&1; then
+        runuser -u "$target_user" -- "$@"
+        return
+    fi
+
+    if command -v sudo >/dev/null 2>&1; then
+        sudo -u "$target_user" "$@"
+        return
+    fi
+
+    print_error "Neither runuser nor sudo is available to execute commands as ${target_user}"
+    exit 1
+}
+
 # Detect distribution
 detect_distro() {
     if [ -f /etc/os-release ]; then
@@ -112,39 +130,32 @@ detect_distro() {
     case $OS in
         ubuntu|debian)
             PKG_MANAGER="apt"
-            PKG_UPDATE="apt update"
             PKG_INSTALL="apt install -y"
             POSTGRES_CONF_DIR="/etc/postgresql/${POSTGRES_VERSION}/main"
             ;;
         rhel|centos|rocky|almalinux|ol)
             if command -v dnf &> /dev/null; then
                 PKG_MANAGER="dnf"
-                PKG_UPDATE="dnf check-update || true"
                 PKG_INSTALL="dnf install -y --setopt=install_weak_deps=False --setopt=max_parallel_downloads=1 --setopt=keepcache=0"
             else
                 PKG_MANAGER="yum"
-                PKG_UPDATE="yum check-update || true"
                 PKG_INSTALL="yum install -y"
             fi
-            POSTGRES_CONF_DIR="/var/lib/pgsql/${POSTGRES_VERSION}/data"
-            ;;
-        fedora)
-            PKG_MANAGER="dnf"
-            PKG_UPDATE="dnf check-update || true"
-            PKG_INSTALL="dnf install -y --setopt=install_weak_deps=False --setopt=max_parallel_downloads=1 --setopt=keepcache=0"
             POSTGRES_CONF_DIR="/var/lib/pgsql/${POSTGRES_VERSION}/data"
             ;;
         amzn)
             if command -v dnf &> /dev/null; then
                 PKG_MANAGER="dnf"
-                PKG_UPDATE="dnf check-update || true"
                 PKG_INSTALL="dnf install -y --setopt=install_weak_deps=False --setopt=max_parallel_downloads=1 --setopt=keepcache=0"
             else
                 PKG_MANAGER="yum"
-                PKG_UPDATE="yum check-update || true"
                 PKG_INSTALL="yum install -y"
             fi
             POSTGRES_CONF_DIR="/var/lib/pgsql/${POSTGRES_VERSION}/data"
+            ;;
+        fedora)
+            print_error "Fedora is not supported by this installer because Zabbix 7.0 does not publish an official Fedora repository."
+            exit 1
             ;;
         *)
             print_error "Unsupported distribution: $OS"
@@ -155,27 +166,48 @@ detect_distro() {
     print_success "Package manager: $PKG_MANAGER"
 }
 
+refresh_package_metadata() {
+    case "$PKG_MANAGER" in
+        apt)
+            apt update > /dev/null 2>&1
+            ;;
+        dnf)
+            dnf makecache --refresh -q > /dev/null 2>&1
+            ;;
+        yum)
+            yum makecache -q > /dev/null 2>&1 || yum makecache fast -q > /dev/null 2>&1
+            ;;
+    esac
+}
+
 # Download with retry
 download_with_retry() {
     local url=$1
     local output=$2
     local max_retries=3
     local retry=0
+    local download_ok="false"
 
     while [ $retry -lt $max_retries ]; do
         retry=$((retry + 1))
         echo "  Attempt $retry of $max_retries..."
+        rm -f "$output"
+        download_ok="false"
 
         if command -v curl >/dev/null 2>&1; then
-            curl -L -f -o "$output" "$url" 2>/dev/null || true
+            if curl -L -f -o "$output" "$url" 2>/dev/null; then
+                download_ok="true"
+            fi
         elif command -v wget >/dev/null 2>&1; then
-            wget -q -O "$output" "$url" 2>/dev/null || true
+            if wget -q -O "$output" "$url" 2>/dev/null; then
+                download_ok="true"
+            fi
         else
             print_error "Neither curl nor wget is available for downloads"
             return 1
         fi
 
-        if [ -f "$output" ] && [ -s "$output" ]; then
+        if [ "$download_ok" = "true" ] && [ -f "$output" ] && [ -s "$output" ]; then
             print_success "Download complete!"
             return 0
         fi
@@ -427,7 +459,26 @@ show_mode_guidance() {
 
 get_zabbix_repo_url() {
     local arch
+    local zabbix_repo_family
     arch=$(uname -m)
+
+    case "$OS" in
+        rhel)
+            zabbix_repo_family="rhel"
+            ;;
+        centos)
+            zabbix_repo_family="centos"
+            ;;
+        rocky)
+            zabbix_repo_family="rocky"
+            ;;
+        almalinux)
+            zabbix_repo_family="alma"
+            ;;
+        ol)
+            zabbix_repo_family="oracle"
+            ;;
+    esac
 
     case "$OS" in
         ubuntu)
@@ -439,8 +490,8 @@ get_zabbix_repo_url() {
         amzn)
             echo "https://repo.zabbix.com/zabbix/${ZABBIX_VERSION}/amazonlinux/${VERSION%%.*}/${arch}/zabbix-release-latest-${ZABBIX_VERSION}.amzn${VERSION%%.*}.noarch.rpm"
             ;;
-        rhel|centos|rocky|almalinux|ol|fedora)
-            echo "https://repo.zabbix.com/zabbix/${ZABBIX_VERSION}/rhel/$(rpm -E %{rhel})/${arch}/zabbix-release-latest-${ZABBIX_VERSION}.el$(rpm -E %{rhel}).noarch.rpm"
+        rhel|centos|rocky|almalinux|ol)
+            echo "https://repo.zabbix.com/zabbix/${ZABBIX_VERSION}/${zabbix_repo_family}/$(rpm -E %{rhel})/${arch}/zabbix-release-latest-${ZABBIX_VERSION}.el$(rpm -E %{rhel}).noarch.rpm"
             ;;
     esac
 }
@@ -672,8 +723,10 @@ install_postgresql() {
     print_header "[1/3] Installing PostgreSQL $POSTGRES_VERSION"
     print_info ""
 
+    local pgdg_repo_arch
     local pgdg_repo_rpm_url
     local pgdg_repo_rpm_file="/tmp/pgdg-redhat-repo-latest.noarch.rpm"
+    pgdg_repo_arch=$(uname -m)
 
     case $OS in
         ubuntu|debian)
@@ -683,27 +736,27 @@ install_postgresql() {
             $PKG_INSTALL wget curl ca-certificates gnupg lsb-release > /dev/null 2>&1
             
             # Add PostgreSQL GPG key
-            wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg
+            wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor --yes -o /usr/share/keyrings/postgresql-keyring.gpg
             
             # Add repository
-            echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+            echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list
             
             # Update and install
             print_info "Installing PostgreSQL..."
-            $PKG_UPDATE > /dev/null 2>&1
+            refresh_package_metadata
             $PKG_INSTALL postgresql-${POSTGRES_VERSION} postgresql-contrib-${POSTGRES_VERSION} > /dev/null 2>&1
             
             print_success "PostgreSQL installed!"
             ;;
             
-        rhel|centos|rocky|almalinux|ol|fedora|amzn)
+        rhel|centos|rocky|almalinux|ol|amzn)
             print_info "Adding PostgreSQL repository..."
 
             # Install repository RPM locally instead of asking dnf/yum to fetch a remote URL.
             # This is lighter on constrained hosts and avoids opaque "Killed" failures from the package manager.
-            pgdg_repo_rpm_url="https://download.postgresql.org/pub/repos/yum/reporpms/EL-$(rpm -E %{rhel})-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+            pgdg_repo_rpm_url="https://download.postgresql.org/pub/repos/yum/reporpms/EL-$(rpm -E %{rhel})-${pgdg_repo_arch}/pgdg-redhat-repo-latest.noarch.rpm"
             download_with_retry "$pgdg_repo_rpm_url" "$pgdg_repo_rpm_file"
-            rpm -Uvh --quiet "$pgdg_repo_rpm_file"
+            rpm -Uvh --quiet --replacepkgs "$pgdg_repo_rpm_file"
             rm -f "$pgdg_repo_rpm_file"
             
             # Disable built-in PostgreSQL module (RHEL 8+)
@@ -735,7 +788,7 @@ install_postgresql() {
         print_success "PostgreSQL running!"
     else
         print_error "PostgreSQL failed to start"
-        journalctl -u postgresql -n 20 --no-pager
+        journalctl -u postgresql-${POSTGRES_VERSION} -u postgresql -n 20 --no-pager
         exit 1
     fi
 }
@@ -797,7 +850,7 @@ create_database() {
     local escaped_db_password
     escaped_db_password=$(escape_sql_literal "$DB_PASSWORD")
 
-    sudo -u postgres psql -v ON_ERROR_STOP=1 >/dev/null <<EOF
+    run_as_user postgres psql -v ON_ERROR_STOP=1 >/dev/null <<EOF
 DO \$\$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zabbix') THEN
@@ -809,14 +862,14 @@ END
 \$\$;
 EOF
 
-    if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='zabbix_proxy'" | grep -q 1; then
-        sudo -u postgres createdb -O zabbix zabbix_proxy
+    if ! run_as_user postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='zabbix_proxy'" | grep -q 1; then
+        run_as_user postgres createdb -O zabbix zabbix_proxy
     else
         print_warning "Database zabbix_proxy already exists"
     fi
 
-    sudo -u postgres psql -d zabbix_proxy -c "ALTER SCHEMA public OWNER TO zabbix;" > /dev/null 2>&1 || true
-    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE zabbix_proxy TO zabbix;" > /dev/null 2>&1
+    run_as_user postgres psql -d zabbix_proxy -c "ALTER SCHEMA public OWNER TO zabbix;" > /dev/null 2>&1 || true
+    run_as_user postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE zabbix_proxy TO zabbix;" > /dev/null 2>&1
 
     print_success "Database and user ready!"
 }
@@ -827,13 +880,14 @@ install_zabbix() {
     print_header "[2/3] Installing Zabbix Proxy ${ZABBIX_VERSION} LTS"
     print_info ""
 
+    local repo_url
+    local repo_rpm_file
     pause_postgresql_for_low_memory_install
 
     case $OS in
         ubuntu|debian)
             print_info "Adding Zabbix repository..."
 
-            local repo_url
             repo_url=$(get_zabbix_repo_url)
 
             download_with_retry "$repo_url" /tmp/zabbix-release.deb
@@ -842,19 +896,21 @@ install_zabbix() {
             
             # Update and install
             print_info "Installing Zabbix Proxy..."
-            $PKG_UPDATE > /dev/null 2>&1
+            refresh_package_metadata
             $PKG_INSTALL zabbix-proxy-pgsql > /dev/null 2>&1
             $PKG_INSTALL zabbix-sql-scripts > /dev/null 2>&1
             
             print_success "Zabbix Proxy installed!"
             ;;
             
-        rhel|centos|rocky|almalinux|ol|fedora|amzn)
+        rhel|centos|rocky|almalinux|ol|amzn)
             print_info "Adding Zabbix repository..."
 
-            local repo_url
             repo_url=$(get_zabbix_repo_url)
-            rpm -Uvh "$repo_url" > /dev/null 2>&1
+            repo_rpm_file="/tmp/zabbix-release-latest.noarch.rpm"
+            download_with_retry "$repo_url" "$repo_rpm_file"
+            rpm -Uvh --replacepkgs "$repo_rpm_file" > /dev/null 2>&1
+            rm -f "$repo_rpm_file"
             
             # Clean cache
             $PKG_MANAGER clean all > /dev/null 2>&1
@@ -881,6 +937,7 @@ import_schema() {
         SCHEMA_FILE="/usr/share/zabbix-sql-scripts/postgresql/proxy.sql"
     elif [ -f "/usr/share/doc/zabbix-sql-scripts/postgresql/proxy.sql.gz" ]; then
         zcat /usr/share/doc/zabbix-sql-scripts/postgresql/proxy.sql.gz > /tmp/proxy.sql
+        chmod 644 /tmp/proxy.sql
         SCHEMA_FILE="/tmp/proxy.sql"
     else
         print_error "Could not find Zabbix schema file"
@@ -888,10 +945,10 @@ import_schema() {
     fi
     
     # Import schema (check if already imported)
-    sudo -u postgres psql -d zabbix_proxy -c "\dt" | grep -q "hosts" && {
+    run_as_user postgres psql -d zabbix_proxy -c "\dt" | grep -q "hosts" && {
         print_warning "Schema already imported, skipping"
     } || {
-        sudo -u zabbix psql zabbix_proxy < "$SCHEMA_FILE" > /dev/null 2>&1
+        run_as_user zabbix psql -v ON_ERROR_STOP=1 zabbix_proxy < "$SCHEMA_FILE" > /dev/null 2>&1
         print_success "Schema imported!"
     }
     
@@ -1075,7 +1132,7 @@ print_summary() {
     print_success "Useful commands:"
     echo "  Check status:"
     echo "    systemctl status zabbix-proxy"
-    echo "    systemctl status postgresql"
+    echo "    systemctl status postgresql-${POSTGRES_VERSION} || systemctl status postgresql"
     print_info ""
     echo "  View logs:"
     echo "    tail -f /var/log/zabbix/zabbix_proxy.log"
@@ -1083,10 +1140,10 @@ print_summary() {
     print_info ""
     echo "  Restart services:"
     echo "    systemctl restart zabbix-proxy"
-    echo "    systemctl restart postgresql"
+    echo "    systemctl restart postgresql-${POSTGRES_VERSION} || systemctl restart postgresql"
     print_info ""
     echo "  Database access:"
-    echo "    sudo -u postgres psql -d zabbix_proxy"
+    echo "    runuser -u postgres -- psql -d zabbix_proxy"
     
     print_info ""
     print_success "Next steps:"
