@@ -1303,12 +1303,50 @@ install_zabbix() {
     resume_postgresql_after_low_memory_install
 }
 
+# Check if a table exists in the zabbix_proxy public schema
+schema_table_exists() {
+    local table=$1
+    run_as_user postgres psql -tAc \
+        "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='${table}'" \
+        zabbix_proxy 2>/dev/null | grep -q 1
+}
+
+# Count user tables in the zabbix_proxy public schema
+schema_public_table_count() {
+    local count
+    count=$(run_as_user postgres psql -tAc \
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'" \
+        zabbix_proxy 2>/dev/null | tr -d '[:space:]')
+    printf '%s' "${count:-0}"
+}
+
+# A fully imported Zabbix 7.0 proxy schema contains all of these tables.
+# Missing any one means the previous import was interrupted or failed.
+schema_is_complete() {
+    local required="hosts items interface proxy_history dbversion hosts_templates"
+    local t
+    for t in $required; do
+        schema_table_exists "$t" || return 1
+    done
+    return 0
+}
+
+# Drop any leftover objects in the public schema so re-import is clean.
+reset_public_schema() {
+    run_as_user postgres psql -v ON_ERROR_STOP=1 -d zabbix_proxy >/dev/null <<'EOF'
+DROP SCHEMA public CASCADE;
+CREATE SCHEMA public AUTHORIZATION zabbix;
+GRANT ALL ON SCHEMA public TO zabbix;
+GRANT ALL ON SCHEMA public TO public;
+EOF
+}
+
 # Import Zabbix schema
 import_schema() {
     print_info ""
     print_info "Importing Zabbix database schema..."
     local schema_file
-    
+
     # Find schema file
     if [ -f "/usr/share/zabbix-sql-scripts/postgresql/proxy.sql" ]; then
         schema_file="/usr/share/zabbix-sql-scripts/postgresql/proxy.sql"
@@ -1320,15 +1358,28 @@ import_schema() {
         print_error "Could not find Zabbix schema file"
         exit 1
     fi
-    
-    # Import schema (check if already imported)
-    if run_as_user postgres psql -tAc "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='hosts'" zabbix_proxy 2>/dev/null | grep -q 1; then
+
+    if schema_is_complete; then
         print_warning "Schema already imported, skipping"
     else
-        run_as_user zabbix psql -v ON_ERROR_STOP=1 zabbix_proxy < "$schema_file" > /dev/null 2>&1
+        local existing_tables
+        existing_tables=$(schema_public_table_count)
+        if [ "$existing_tables" -gt 0 ]; then
+            print_warning "Detected incomplete schema from previous run (${existing_tables} table(s) present). Resetting and re-importing..."
+            reset_public_schema
+        fi
+
+        local import_log="/tmp/elven-zabbix-proxy-schema-import.log"
+        if ! run_as_user zabbix psql -v ON_ERROR_STOP=1 zabbix_proxy < "$schema_file" > "$import_log" 2>&1; then
+            print_error "Schema import failed. Output:"
+            tail -n 40 "$import_log"
+            rm -f /tmp/proxy.sql "$import_log"
+            exit 1
+        fi
+        rm -f "$import_log"
         print_success "Schema imported!"
     fi
-    
+
     # Clean temp file
     rm -f /tmp/proxy.sql
 }
@@ -1442,24 +1493,32 @@ EOF
 start_zabbix() {
     print_info ""
     print_info "Starting Zabbix Proxy..."
-    
-    systemctl enable zabbix-proxy > /dev/null 2>&1
-    systemctl start zabbix-proxy
-    
+
+    systemctl enable zabbix-proxy > /dev/null 2>&1 || true
+
+    local start_status=0
+    systemctl start zabbix-proxy || start_status=$?
+
     sleep 5
-    
+
     if systemctl is-active --quiet zabbix-proxy; then
         print_success "Zabbix Proxy running!"
-    else
-        print_error "Zabbix Proxy failed to start"
-        print_info "Checking logs..."
-        if [ -f /var/log/zabbix/zabbix_proxy.log ]; then
-            tail -n 30 /var/log/zabbix/zabbix_proxy.log
-        else
-            journalctl -u zabbix-proxy -n 30 --no-pager
-        fi
-        exit 1
+        return 0
     fi
+
+    print_error "Zabbix Proxy failed to start (systemctl exit: ${start_status})"
+    print_info ""
+    print_info "Service status:"
+    systemctl status zabbix-proxy --no-pager -l 2>&1 || true
+    print_info ""
+    print_info "Last 40 lines of journal for zabbix-proxy:"
+    journalctl -u zabbix-proxy -n 40 --no-pager 2>&1 || true
+    if [ -s /var/log/zabbix/zabbix_proxy.log ]; then
+        print_info ""
+        print_info "Last 40 lines of /var/log/zabbix/zabbix_proxy.log:"
+        tail -n 40 /var/log/zabbix/zabbix_proxy.log
+    fi
+    exit 1
 }
 
 # Print summary
