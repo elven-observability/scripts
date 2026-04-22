@@ -10,6 +10,13 @@
 
 set -Ee -o pipefail
 
+# Never let apt/dpkg pop an interactive prompt mid-install. Without this,
+# package config prompts (e.g. kernel restart, conffile diffs) can hang
+# the script silently even though apt itself was invoked with -y.
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -182,18 +189,19 @@ detect_distro() {
 refresh_package_metadata() {
     case "$PKG_MANAGER" in
         apt)
-            apt update > /dev/null 2>&1
+            run_long_step "Refreshing APT metadata" apt-get update -qq
             ;;
         dnf)
-            dnf makecache --refresh -q > /dev/null 2>&1
+            run_long_step "Refreshing DNF metadata" dnf makecache --refresh -q
             ;;
         yum)
-            yum makecache -q > /dev/null 2>&1 || yum makecache fast -q > /dev/null 2>&1
+            run_long_step "Refreshing YUM metadata" bash -c 'yum makecache -q || yum makecache fast -q'
             ;;
     esac
 }
 
-# Download with retry
+# Download with retry. Every attempt has hard connect and total timeouts
+# so a dead mirror cannot hang the installer indefinitely.
 download_with_retry() {
     local url=$1
     local output=$2
@@ -208,11 +216,12 @@ download_with_retry() {
         download_ok="false"
 
         if command -v curl >/dev/null 2>&1; then
-            if curl -L -f -o "$output" "$url" 2>/dev/null; then
+            if curl -L -f --connect-timeout 15 --max-time 180 \
+                -o "$output" "$url" 2>/dev/null; then
                 download_ok="true"
             fi
         elif command -v wget >/dev/null 2>&1; then
-            if wget -q -O "$output" "$url" 2>/dev/null; then
+            if wget -q --timeout=180 --tries=1 -O "$output" "$url" 2>/dev/null; then
                 download_ok="true"
             fi
         else
@@ -231,6 +240,56 @@ download_with_retry() {
 
     print_error "Failed to download after $max_retries attempts"
     return 1
+}
+
+# Run a command that may take several minutes without hiding it from the user.
+# Streams output to a log file, prints a heartbeat every 10s so the user can
+# see progress, enforces a hard timeout so a wedged apt/dnf cannot hang the
+# installer forever, and tails the log on failure.
+#
+# Usage: run_long_step "Human-readable description" cmd arg1 arg2 ...
+run_long_step() {
+    local description=$1
+    shift
+
+    local log_file="/tmp/elven-zabbix-step-$$-$(date +%s).log"
+    local hard_timeout=900   # 15 minutes
+    local cmd_pid rc=0 start_ts elapsed
+
+    print_info "  ${description} (up to ${hard_timeout}s)..."
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$hard_timeout" "$@" > "$log_file" 2>&1 &
+    else
+        "$@" > "$log_file" 2>&1 &
+    fi
+    cmd_pid=$!
+    start_ts=$SECONDS
+
+    while kill -0 "$cmd_pid" 2>/dev/null; do
+        sleep 10
+        if kill -0 "$cmd_pid" 2>/dev/null; then
+            elapsed=$((SECONDS - start_ts))
+            printf "    ...still running (%ds)\n" "$elapsed"
+        fi
+    done
+
+    wait "$cmd_pid" || rc=$?
+
+    if [ "$rc" -ne 0 ]; then
+        if [ "$rc" -eq 124 ]; then
+            print_error "${description} timed out after ${hard_timeout}s."
+        else
+            print_error "${description} failed (exit ${rc})."
+        fi
+        print_info "  Last 40 lines of command output:"
+        tail -n 40 "$log_file" 2>&1 || true
+        rm -f "$log_file"
+        return "$rc"
+    fi
+
+    rm -f "$log_file"
+    return 0
 }
 
 # Get memory in GB
@@ -563,7 +622,7 @@ configure_ping_tools() {
 
     if ! FPING_LOCATION=$(find_executable_path fping /usr/sbin/fping /usr/bin/fping); then
         print_warning "fping binary not found. Attempting to install package 'fping'..."
-        if ! $PKG_INSTALL fping > /dev/null 2>&1; then
+        if ! run_long_step "Installing fping" $PKG_INSTALL fping; then
             print_warning "Unable to install fping automatically. ICMP pingers will be disabled to keep Zabbix Proxy startable."
             START_PINGERS=0
             FPING_LOCATION=""
@@ -1105,26 +1164,27 @@ install_postgresql() {
     case $OS in
         ubuntu|debian)
             print_info "Adding PostgreSQL repository..."
-            
+
             # Install prerequisites
-            $PKG_INSTALL wget curl ca-certificates gnupg lsb-release > /dev/null 2>&1
-            
+            run_long_step "Installing download prerequisites" \
+                $PKG_INSTALL wget curl ca-certificates gnupg lsb-release
+
             # Add PostgreSQL GPG key
             wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor --yes -o /usr/share/keyrings/postgresql-keyring.gpg
-            
+
             # Add repository
             echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list
-            
+
             # Update and install
-            print_info "Installing PostgreSQL..."
             refresh_package_metadata
-            $PKG_INSTALL postgresql-${POSTGRES_VERSION} postgresql-contrib-${POSTGRES_VERSION} > /dev/null 2>&1
+            run_long_step "Installing PostgreSQL ${POSTGRES_VERSION} packages" \
+                $PKG_INSTALL postgresql-${POSTGRES_VERSION} postgresql-contrib-${POSTGRES_VERSION}
 
             initialize_postgresql_cluster
-            
+
             print_success "PostgreSQL installed!"
             ;;
-            
+
         rhel|centos|rocky|almalinux|ol|amzn)
             print_info "Adding PostgreSQL repository..."
 
@@ -1134,17 +1194,17 @@ install_postgresql() {
             download_with_retry "$pgdg_repo_rpm_url" "$pgdg_repo_rpm_file"
             rpm -Uvh --quiet --replacepkgs "$pgdg_repo_rpm_file"
             rm -f "$pgdg_repo_rpm_file"
-            
+
             # Disable built-in PostgreSQL module (RHEL 8+)
             if [ "$PKG_MANAGER" = "dnf" ]; then
                 dnf -qy module disable postgresql > /dev/null 2>&1 || true
             fi
-            
-            print_info "Installing PostgreSQL..."
-            $PKG_INSTALL postgresql${POSTGRES_VERSION}-server postgresql${POSTGRES_VERSION}-contrib > /dev/null 2>&1
+
+            run_long_step "Installing PostgreSQL ${POSTGRES_VERSION} packages" \
+                $PKG_INSTALL postgresql${POSTGRES_VERSION}-server postgresql${POSTGRES_VERSION}-contrib
 
             initialize_postgresql_cluster
-            
+
             print_success "PostgreSQL installed!"
             ;;
     esac
@@ -1264,16 +1324,17 @@ install_zabbix() {
             download_with_retry "$repo_url" /tmp/zabbix-release.deb
             dpkg -i /tmp/zabbix-release.deb > /dev/null 2>&1
             rm /tmp/zabbix-release.deb
-            
+
             # Update and install
-            print_info "Installing Zabbix Proxy..."
             refresh_package_metadata
-            $PKG_INSTALL zabbix-proxy-pgsql > /dev/null 2>&1
-            $PKG_INSTALL zabbix-sql-scripts > /dev/null 2>&1
-            
+            run_long_step "Installing zabbix-proxy-pgsql" \
+                $PKG_INSTALL zabbix-proxy-pgsql
+            run_long_step "Installing zabbix-sql-scripts" \
+                $PKG_INSTALL zabbix-sql-scripts
+
             print_success "Zabbix Proxy installed!"
             ;;
-            
+
         rhel|centos|rocky|almalinux|ol|amzn)
             print_info "Adding Zabbix repository..."
 
@@ -1282,15 +1343,15 @@ install_zabbix() {
             download_with_retry "$repo_url" "$repo_rpm_file"
             rpm -Uvh --replacepkgs "$repo_rpm_file" > /dev/null 2>&1
             rm -f "$repo_rpm_file"
-            
+
             # Clean cache
             $PKG_MANAGER clean all > /dev/null 2>&1
-            
-            # Install
-            print_info "Installing Zabbix Proxy..."
-            $PKG_INSTALL zabbix-proxy-pgsql > /dev/null 2>&1
-            $PKG_INSTALL zabbix-sql-scripts > /dev/null 2>&1
-            
+
+            run_long_step "Installing zabbix-proxy-pgsql" \
+                $PKG_INSTALL zabbix-proxy-pgsql
+            run_long_step "Installing zabbix-sql-scripts" \
+                $PKG_INSTALL zabbix-sql-scripts
+
             print_success "Zabbix Proxy installed!"
             ;;
     esac
