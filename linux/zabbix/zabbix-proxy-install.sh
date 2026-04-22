@@ -94,6 +94,8 @@ PREVIOUS_INSTALLATION_FINDINGS=""
 CLEANUP_PERFORMED="false"
 CLEANUP_BACKUP_DIR=""
 CLEANUP_TIMESTAMP=""
+FPING_LOCATION=""
+FPING6_LOCATION=""
 
 # Check root
 check_root() {
@@ -529,6 +531,59 @@ EOF
 
     if [ -n "$TLS_PSK_FILE" ]; then
         echo "TLSPSKFile=${TLS_PSK_FILE}"
+    fi
+
+    return 0
+}
+
+find_executable_path() {
+    local candidate
+
+    for candidate in "$@"; do
+        if [[ "$candidate" == */* ]]; then
+            if [ -x "$candidate" ]; then
+                echo "$candidate"
+                return 0
+            fi
+        elif command -v "$candidate" >/dev/null 2>&1; then
+            command -v "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+configure_ping_tools() {
+    if [ "${START_PINGERS:-0}" -le 0 ]; then
+        FPING_LOCATION=""
+        FPING6_LOCATION=""
+        return 0
+    fi
+
+    if ! FPING_LOCATION=$(find_executable_path fping /usr/sbin/fping /usr/bin/fping); then
+        print_warning "fping binary not found. Attempting to install package 'fping'..."
+        if ! $PKG_INSTALL fping > /dev/null 2>&1; then
+            print_warning "Unable to install fping automatically. ICMP pingers will be disabled to keep Zabbix Proxy startable."
+            START_PINGERS=0
+            FPING_LOCATION=""
+            FPING6_LOCATION=""
+            return 0
+        fi
+
+        if ! FPING_LOCATION=$(find_executable_path fping /usr/sbin/fping /usr/bin/fping); then
+            print_warning "fping package installed, but binary path could not be resolved. ICMP pingers will be disabled."
+            START_PINGERS=0
+            FPING_LOCATION=""
+            FPING6_LOCATION=""
+            return 0
+        fi
+    fi
+
+    if FPING6_LOCATION=$(find_executable_path fping6 /usr/sbin/fping6 /usr/bin/fping6); then
+        :
+    else
+        FPING6_LOCATION=""
     fi
 
     return 0
@@ -1284,6 +1339,8 @@ configure_zabbix() {
     print_header "[3/3] Configuring Zabbix Proxy"
     print_info ""
 
+    configure_ping_tools
+
     # Backup original config
     [ -f "$ZABBIX_CONF" ] && cp "$ZABBIX_CONF" "${ZABBIX_CONF}.backup"
 
@@ -1341,14 +1398,10 @@ VMwareTimeout=10
 
 # Network
 ListenPort=${LISTEN_PORT}
-SourceIP=${SOURCE_IP}
 
 # Other
 SNMPTrapperFile=/var/log/snmptrap/snmptrap.log
 ExternalScripts=/usr/lib/zabbix/externalscripts
-FpingLocation=/usr/bin/fping
-Fping6Location=/usr/bin/fping6
-SSHKeyLocation=
 LogSlowQueries=3000
 
 # StatsAllowedIP=127.0.0.1
@@ -1356,6 +1409,19 @@ EOF
 
     if [ -n "$LISTEN_IP" ]; then
         echo "ListenIP=${LISTEN_IP}" >> "$ZABBIX_CONF"
+    fi
+
+    if [ -n "$SOURCE_IP" ]; then
+        echo "SourceIP=${SOURCE_IP}" >> "$ZABBIX_CONF"
+    fi
+
+    if [ -n "$FPING_LOCATION" ]; then
+        echo "FpingLocation=${FPING_LOCATION}" >> "$ZABBIX_CONF"
+        if [ -n "$FPING6_LOCATION" ]; then
+            echo "Fping6Location=${FPING6_LOCATION}" >> "$ZABBIX_CONF"
+        else
+            echo "Fping6Location=" >> "$ZABBIX_CONF"
+        fi
     fi
 
     build_tls_config >> "$ZABBIX_CONF"
