@@ -966,8 +966,6 @@ get_performance_params() {
             CACHE_SIZE="128M"
             HISTORY_CACHE_SIZE="64M"
             HISTORY_INDEX_CACHE_SIZE="32M"
-            TREND_CACHE_SIZE="32M"
-            VALUE_CACHE_SIZE="64M"
             # PostgreSQL
             PG_SHARED_BUFFERS="256MB"
             PG_EFFECTIVE_CACHE_SIZE="512MB"
@@ -987,8 +985,6 @@ get_performance_params() {
             CACHE_SIZE="512M"
             HISTORY_CACHE_SIZE="256M"
             HISTORY_INDEX_CACHE_SIZE="128M"
-            TREND_CACHE_SIZE="128M"
-            VALUE_CACHE_SIZE="256M"
             # PostgreSQL
             PG_SHARED_BUFFERS="$(($mem_gb * 256 / 4))MB"
             PG_EFFECTIVE_CACHE_SIZE="$(($mem_gb * 768 / 4))MB"
@@ -1008,8 +1004,6 @@ get_performance_params() {
             CACHE_SIZE="1G"
             HISTORY_CACHE_SIZE="512M"
             HISTORY_INDEX_CACHE_SIZE="256M"
-            TREND_CACHE_SIZE="256M"
-            VALUE_CACHE_SIZE="512M"
             # PostgreSQL
             PG_SHARED_BUFFERS="$(($mem_gb * 256 / 2))MB"
             PG_EFFECTIVE_CACHE_SIZE="$(($mem_gb * 768 / 2))MB"
@@ -1029,8 +1023,6 @@ get_performance_params() {
             CACHE_SIZE="2G"
             HISTORY_CACHE_SIZE="1G"
             HISTORY_INDEX_CACHE_SIZE="512M"
-            TREND_CACHE_SIZE="512M"
-            VALUE_CACHE_SIZE="1G"
             # PostgreSQL
             PG_SHARED_BUFFERS="$(($mem_gb * 256))MB"
             PG_EFFECTIVE_CACHE_SIZE="$(($mem_gb * 768))MB"
@@ -1052,12 +1044,15 @@ get_performance_params() {
 # Stop existing services
 stop_existing_services() {
     print_info "Checking for existing services..."
-    
-    if systemctl is-active --quiet zabbix-proxy 2>/dev/null; then
+
+    # Stop and clear any failed/restart state so a previous broken install
+    # doesn't keep the unit in an auto-restart loop while we reinstall.
+    if systemctl list-unit-files zabbix-proxy.service >/dev/null 2>&1; then
         print_info "  Stopping zabbix-proxy..."
-        systemctl stop zabbix-proxy
+        systemctl stop zabbix-proxy > /dev/null 2>&1 || true
+        systemctl reset-failed zabbix-proxy > /dev/null 2>&1 || true
     fi
-    
+
     print_success "Clean!"
 }
 
@@ -1424,11 +1419,11 @@ Timeout=10
 TrapperTimeout=300
 
 # Cache Configuration
+# Note: TrendCacheSize and ValueCacheSize are server-only parameters.
+# Zabbix Proxy does not compute trends and has no trigger value cache.
 CacheSize=${CACHE_SIZE}
 HistoryCacheSize=${HISTORY_CACHE_SIZE}
 HistoryIndexCacheSize=${HISTORY_INDEX_CACHE_SIZE}
-TrendCacheSize=${TREND_CACHE_SIZE}
-ValueCacheSize=${VALUE_CACHE_SIZE}
 
 # Data Transfer
 ProxyConfigFrequency=${PROXY_CONFIG_FREQUENCY}
@@ -1495,6 +1490,9 @@ start_zabbix() {
     print_info "Starting Zabbix Proxy..."
 
     systemctl enable zabbix-proxy > /dev/null 2>&1 || true
+    # Clear any leftover failed/restart state from previous installs
+    # so the auto-restart loop doesn't race with our start.
+    systemctl reset-failed zabbix-proxy > /dev/null 2>&1 || true
 
     local start_status=0
     systemctl start zabbix-proxy || start_status=$?
