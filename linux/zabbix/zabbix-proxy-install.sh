@@ -497,11 +497,25 @@ TLSConnect=${TLS_MODE}
 TLSAccept=${TLS_ACCEPT}
 EOF
 
-    [ -n "$TLS_CA_FILE" ] && echo "TLSCAFile=${TLS_CA_FILE}"
-    [ -n "$TLS_CERT_FILE" ] && echo "TLSCertFile=${TLS_CERT_FILE}"
-    [ -n "$TLS_KEY_FILE" ] && echo "TLSKeyFile=${TLS_KEY_FILE}"
-    [ -n "$TLS_PSK_IDENTITY" ] && echo "TLSPSKIdentity=${TLS_PSK_IDENTITY}"
-    [ -n "$TLS_PSK_FILE" ] && echo "TLSPSKFile=${TLS_PSK_FILE}"
+    if [ -n "$TLS_CA_FILE" ]; then
+        echo "TLSCAFile=${TLS_CA_FILE}"
+    fi
+
+    if [ -n "$TLS_CERT_FILE" ]; then
+        echo "TLSCertFile=${TLS_CERT_FILE}"
+    fi
+
+    if [ -n "$TLS_KEY_FILE" ]; then
+        echo "TLSKeyFile=${TLS_KEY_FILE}"
+    fi
+
+    if [ -n "$TLS_PSK_IDENTITY" ]; then
+        echo "TLSPSKIdentity=${TLS_PSK_IDENTITY}"
+    fi
+
+    if [ -n "$TLS_PSK_FILE" ]; then
+        echo "TLSPSKFile=${TLS_PSK_FILE}"
+    fi
 }
 
 show_mode_guidance() {
