@@ -467,7 +467,7 @@ validate_configuration() {
     validate_int_range "PROXY_OFFLINE_BUFFER" "$PROXY_OFFLINE_BUFFER" 1 720
     validate_int_range "PROXY_CONFIG_FREQUENCY" "$PROXY_CONFIG_FREQUENCY" 1 604800
     validate_int_range "DATA_SENDER_FREQUENCY" "$DATA_SENDER_FREQUENCY" 1 3600
-    validate_int_range "LISTEN_PORT" "$LISTEN_PORT" 1024 32767
+    validate_int_range "LISTEN_PORT" "$LISTEN_PORT" 1024 65535
 
     case "$PERFORMANCE_PROFILE" in
         light|medium|heavy|ultra)
@@ -1317,13 +1317,19 @@ schema_public_table_count() {
 
 # A fully imported Zabbix 7.0 proxy schema contains all of these tables.
 # Missing any one means the previous import was interrupted or failed.
+# dbversion must also hold at least one row so we know the version
+# metadata was populated at the tail end of the import.
 schema_is_complete() {
-    local required="hosts items interface proxy_history dbversion hosts_templates"
+    local required="hosts items interface proxy_history dbversion"
     local t
     for t in $required; do
         schema_table_exists "$t" || return 1
     done
-    return 0
+
+    local dbversion_rows
+    dbversion_rows=$(run_as_user postgres psql -tAc \
+        "SELECT count(*) FROM dbversion" zabbix_proxy 2>/dev/null | tr -d '[:space:]')
+    [ -n "$dbversion_rows" ] && [ "$dbversion_rows" -gt 0 ]
 }
 
 # Drop any leftover objects in the public schema so re-import is clean.
