@@ -24,6 +24,7 @@ POSTGRES_VERSION="17"
 # Directories
 ZABBIX_CONF="/etc/zabbix/zabbix_proxy.conf"
 POSTGRES_CONF_DIR="/etc/postgresql/${POSTGRES_VERSION}/main"
+POSTGRES_DATA_DIR="/var/lib/postgresql/${POSTGRES_VERSION}/main"
 
 # Functions
 print_success() {
@@ -84,8 +85,15 @@ AUTO_CREATE_SWAP="${AUTO_CREATE_SWAP:-auto}"
 SWAP_FILE_PATH="${SWAP_FILE_PATH:-/swapfile.elven-zabbix-installer}"
 SWAP_SIZE_MB="${SWAP_SIZE_MB:-2048}"
 LOW_MEMORY_THRESHOLD_MB="${LOW_MEMORY_THRESHOLD_MB:-2048}"
+CLEANUP_MODE="${ELVEN_CLEANUP_MODE:-prompt}"
+CLEANUP_BACKUP_ROOT="${ELVEN_CLEANUP_BACKUP_ROOT:-/var/backups/elven-zabbix-proxy}"
 TEMP_SWAP_ENABLED="false"
 POSTGRES_STOPPED_FOR_ZABBIX_INSTALL="false"
+PREVIOUS_INSTALLATION_DETECTED="false"
+PREVIOUS_INSTALLATION_FINDINGS=""
+CLEANUP_PERFORMED="false"
+CLEANUP_BACKUP_DIR=""
+CLEANUP_TIMESTAMP=""
 
 # Check root
 check_root() {
@@ -132,6 +140,7 @@ detect_distro() {
             PKG_MANAGER="apt"
             PKG_INSTALL="apt install -y"
             POSTGRES_CONF_DIR="/etc/postgresql/${POSTGRES_VERSION}/main"
+            POSTGRES_DATA_DIR="/var/lib/postgresql/${POSTGRES_VERSION}/main"
             ;;
         rhel|centos|rocky|almalinux|ol)
             if command -v dnf &> /dev/null; then
@@ -142,6 +151,7 @@ detect_distro() {
                 PKG_INSTALL="yum install -y"
             fi
             POSTGRES_CONF_DIR="/var/lib/pgsql/${POSTGRES_VERSION}/data"
+            POSTGRES_DATA_DIR="/var/lib/pgsql/${POSTGRES_VERSION}/data"
             ;;
         amzn)
             if command -v dnf &> /dev/null; then
@@ -152,6 +162,7 @@ detect_distro() {
                 PKG_INSTALL="yum install -y"
             fi
             POSTGRES_CONF_DIR="/var/lib/pgsql/${POSTGRES_VERSION}/data"
+            POSTGRES_DATA_DIR="/var/lib/pgsql/${POSTGRES_VERSION}/data"
             ;;
         fedora)
             print_error "Fedora is not supported by this installer because Zabbix 7.0 does not publish an official Fedora repository."
@@ -237,6 +248,51 @@ get_memory_mb() {
 
 get_swap_mb() {
     awk '/SwapTotal/ {print int($2 / 1024)}' /proc/meminfo
+}
+
+is_postgresql_initialized() {
+    [ -s "${POSTGRES_DATA_DIR}/PG_VERSION" ]
+}
+
+append_previous_installation_finding() {
+    local finding=$1
+
+    PREVIOUS_INSTALLATION_DETECTED="true"
+    if [ -n "$PREVIOUS_INSTALLATION_FINDINGS" ]; then
+        PREVIOUS_INSTALLATION_FINDINGS="${PREVIOUS_INSTALLATION_FINDINGS}"$'\n'"  - ${finding}"
+    else
+        PREVIOUS_INSTALLATION_FINDINGS="  - ${finding}"
+    fi
+}
+
+package_is_installed() {
+    local package_name=$1
+
+    case "$PKG_MANAGER" in
+        apt)
+            dpkg-query -W -f='${Status}' "$package_name" 2>/dev/null | grep -q "install ok installed"
+            ;;
+        dnf|yum)
+            rpm -q "$package_name" > /dev/null 2>&1
+            ;;
+    esac
+}
+
+postgresql_service_name() {
+    if systemctl list-unit-files "postgresql-${POSTGRES_VERSION}.service" --no-legend 2>/dev/null | grep -q "^postgresql-${POSTGRES_VERSION}\.service"; then
+        echo "postgresql-${POSTGRES_VERSION}"
+    else
+        echo "postgresql"
+    fi
+}
+
+postgresql_service_is_active() {
+    systemctl is-active --quiet "$(postgresql_service_name)" 2>/dev/null
+}
+
+service_unit_exists() {
+    local service_name=$1
+    systemctl list-unit-files "${service_name}.service" --no-legend 2>/dev/null | grep -q "^${service_name}\.service"
 }
 
 # Get CPU count
@@ -496,6 +552,197 @@ get_zabbix_repo_url() {
     esac
 }
 
+is_interactive_mode() {
+    [ -t 0 ] && [ -r /dev/tty ]
+}
+
+detect_previous_installation() {
+    local postgres_service
+    postgres_service=$(postgresql_service_name)
+
+    PREVIOUS_INSTALLATION_DETECTED="false"
+    PREVIOUS_INSTALLATION_FINDINGS=""
+
+    if [ -f "$ZABBIX_CONF" ]; then
+        append_previous_installation_finding "existing proxy configuration found at $ZABBIX_CONF"
+    fi
+
+    if [ -d "/var/log/zabbix" ] && [ -n "$(ls -A /var/log/zabbix 2>/dev/null)" ]; then
+        append_previous_installation_finding "existing Zabbix log files found in /var/log/zabbix"
+    fi
+
+    if [ -d "/var/log/snmptrap" ] && [ -n "$(ls -A /var/log/snmptrap 2>/dev/null)" ]; then
+        append_previous_installation_finding "existing SNMP trap log files found in /var/log/snmptrap"
+    fi
+
+    if [ -f "${POSTGRES_DATA_DIR}/PG_VERSION" ]; then
+        append_previous_installation_finding "existing PostgreSQL cluster detected at ${POSTGRES_DATA_DIR}"
+    elif [ -d "${POSTGRES_DATA_DIR}" ] && [ -n "$(ls -A "${POSTGRES_DATA_DIR}" 2>/dev/null)" ]; then
+        append_previous_installation_finding "non-empty PostgreSQL data directory detected at ${POSTGRES_DATA_DIR}"
+    fi
+
+    if [ "$POSTGRES_CONF_DIR" != "$POSTGRES_DATA_DIR" ] && [ -d "$POSTGRES_CONF_DIR" ]; then
+        append_previous_installation_finding "existing PostgreSQL configuration detected at ${POSTGRES_CONF_DIR}"
+    fi
+
+    if service_unit_exists "zabbix-proxy"; then
+        append_previous_installation_finding "zabbix-proxy service is already installed"
+    fi
+
+    if service_unit_exists "$postgres_service"; then
+        append_previous_installation_finding "${postgres_service} service is already installed"
+    fi
+
+    if package_is_installed "zabbix-proxy-pgsql"; then
+        append_previous_installation_finding "package zabbix-proxy-pgsql is already installed"
+    fi
+
+    if package_is_installed "zabbix-sql-scripts"; then
+        append_previous_installation_finding "package zabbix-sql-scripts is already installed"
+    fi
+
+    case "$OS" in
+        ubuntu|debian)
+            if package_is_installed "postgresql-${POSTGRES_VERSION}"; then
+                append_previous_installation_finding "package postgresql-${POSTGRES_VERSION} is already installed"
+            fi
+            ;;
+        rhel|centos|rocky|almalinux|ol|amzn)
+            if package_is_installed "postgresql${POSTGRES_VERSION}-server"; then
+                append_previous_installation_finding "package postgresql${POSTGRES_VERSION}-server is already installed"
+            fi
+            ;;
+    esac
+
+    if id postgres > /dev/null 2>&1 && command -v psql > /dev/null 2>&1 && postgresql_service_is_active; then
+        if run_as_user postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='zabbix_proxy'" 2>/dev/null | grep -q 1; then
+            append_previous_installation_finding "database zabbix_proxy already exists"
+        fi
+
+        if run_as_user postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='zabbix'" 2>/dev/null | grep -q 1; then
+            append_previous_installation_finding "database role zabbix already exists"
+        fi
+    fi
+}
+
+print_previous_installation_summary() {
+    print_info ""
+    print_warning "Previous installation artifacts were detected:"
+    printf '%s\n' "$PREVIOUS_INSTALLATION_FINDINGS"
+    print_info ""
+    print_info "Cleanup will stop Zabbix Proxy/PostgreSQL and move the old state to ${CLEANUP_BACKUP_ROOT}/<timestamp> before reinstalling."
+    print_info "Use ELVEN_CLEANUP_MODE=force for non-interactive cleanup or ELVEN_CLEANUP_MODE=none to continue without cleanup."
+}
+
+ensure_cleanup_backup_dir() {
+    if [ -z "$CLEANUP_TIMESTAMP" ]; then
+        CLEANUP_TIMESTAMP=$(date +%F-%H%M%S)
+    fi
+
+    if [ -z "$CLEANUP_BACKUP_DIR" ]; then
+        CLEANUP_BACKUP_DIR="${CLEANUP_BACKUP_ROOT}/${CLEANUP_TIMESTAMP}"
+        mkdir -p "$CLEANUP_BACKUP_DIR"
+    fi
+}
+
+backup_and_remove_path() {
+    local target_path=$1
+    local backup_path
+
+    [ -e "$target_path" ] || return 0
+
+    ensure_cleanup_backup_dir
+    backup_path="${CLEANUP_BACKUP_DIR}${target_path}"
+    mkdir -p "$(dirname "$backup_path")"
+    mv "$target_path" "$backup_path"
+    print_info "  Backed up ${target_path} to ${backup_path}"
+}
+
+cleanup_previous_installation() {
+    local postgres_service
+    postgres_service=$(postgresql_service_name)
+
+    print_info ""
+    print_header "Cleanup"
+    print_info "Stopping old services and backing up previous installation state..."
+
+    systemctl stop zabbix-proxy > /dev/null 2>&1 || true
+    systemctl stop "$postgres_service" > /dev/null 2>&1 || true
+
+    backup_and_remove_path "$ZABBIX_CONF"
+    backup_and_remove_path "${ZABBIX_CONF}.backup"
+    backup_and_remove_path "/var/log/zabbix"
+    backup_and_remove_path "/var/log/snmptrap"
+    backup_and_remove_path "$POSTGRES_DATA_DIR"
+
+    if [ "$POSTGRES_CONF_DIR" != "$POSTGRES_DATA_DIR" ]; then
+        backup_and_remove_path "$POSTGRES_CONF_DIR"
+    fi
+
+    rm -f /tmp/elven-postgresql-initdb.log
+    rm -f /tmp/pgdg-redhat-repo-latest.noarch.rpm
+    rm -f /tmp/zabbix-release-latest.noarch.rpm
+    rm -f /tmp/zabbix-release.deb
+    rm -f /tmp/proxy.sql
+
+    case "$PKG_MANAGER" in
+        apt)
+            apt clean > /dev/null 2>&1 || true
+            ;;
+        dnf|yum)
+            $PKG_MANAGER clean all > /dev/null 2>&1 || true
+            ;;
+    esac
+
+    CLEANUP_PERFORMED="true"
+    print_success "Previous installation state was cleaned up."
+    print_info "Backup saved to: ${CLEANUP_BACKUP_DIR}"
+}
+
+handle_previous_installation() {
+    local cleanup_answer
+
+    detect_previous_installation
+
+    if [ "$PREVIOUS_INSTALLATION_DETECTED" != "true" ]; then
+        return 0
+    fi
+
+    print_previous_installation_summary
+
+    case "$CLEANUP_MODE" in
+        none)
+            print_warning "ELVEN_CLEANUP_MODE=none, continuing without cleanup."
+            return 0
+            ;;
+        force)
+            cleanup_previous_installation
+            return 0
+            ;;
+        prompt)
+            if ! is_interactive_mode; then
+                print_error "Previous installation artifacts were found, but ELVEN_CLEANUP_MODE=prompt cannot run without an interactive terminal."
+                print_info "Set ELVEN_CLEANUP_MODE=force to clean automatically or ELVEN_CLEANUP_MODE=none to continue without cleanup."
+                exit 1
+            fi
+
+            read -p "Clean previous installation now (backup + remove old state) before continuing? (y/n): " cleanup_answer < /dev/tty
+            case "$cleanup_answer" in
+                y|Y)
+                    cleanup_previous_installation
+                    ;;
+                *)
+                    print_warning "Continuing without cleanup. If the previous state is inconsistent, the rerun may fail again."
+                    ;;
+            esac
+            ;;
+        *)
+            print_error "ELVEN_CLEANUP_MODE must be one of: none, prompt, force"
+            exit 1
+            ;;
+    esac
+}
+
 # Get user input
 get_user_input() {
     print_info ""
@@ -717,6 +964,39 @@ stop_existing_services() {
     print_success "Clean!"
 }
 
+initialize_postgresql_cluster() {
+    local initdb_log_file="/tmp/elven-postgresql-initdb.log"
+
+    if is_postgresql_initialized; then
+        print_warning "PostgreSQL data directory already initialized at ${POSTGRES_DATA_DIR}. Skipping initialization."
+        return 0
+    fi
+
+    print_info "Initializing database..."
+
+    case "$OS" in
+        ubuntu|debian)
+            if ! command -v pg_createcluster > /dev/null 2>&1; then
+                print_error "pg_createcluster is required to initialize PostgreSQL on ${OS_NAME}"
+                return 1
+            fi
+
+            if ! pg_createcluster "${POSTGRES_VERSION}" main > "$initdb_log_file" 2>&1; then
+                print_error "PostgreSQL cluster creation failed. Output:"
+                cat "$initdb_log_file"
+                return 1
+            fi
+            ;;
+        rhel|centos|rocky|almalinux|ol|amzn)
+            if ! /usr/pgsql-${POSTGRES_VERSION}/bin/postgresql-${POSTGRES_VERSION}-setup initdb > "$initdb_log_file" 2>&1; then
+                print_error "PostgreSQL initdb failed. Output:"
+                cat "$initdb_log_file"
+                return 1
+            fi
+            ;;
+    esac
+}
+
 # Install PostgreSQL
 install_postgresql() {
     print_info ""
@@ -745,6 +1025,8 @@ install_postgresql() {
             print_info "Installing PostgreSQL..."
             refresh_package_metadata
             $PKG_INSTALL postgresql-${POSTGRES_VERSION} postgresql-contrib-${POSTGRES_VERSION} > /dev/null 2>&1
+
+            initialize_postgresql_cluster
             
             print_success "PostgreSQL installed!"
             ;;
@@ -766,13 +1048,8 @@ install_postgresql() {
             
             print_info "Installing PostgreSQL..."
             $PKG_INSTALL postgresql${POSTGRES_VERSION}-server postgresql${POSTGRES_VERSION}-contrib > /dev/null 2>&1
-            
-            # Initialize database
-            print_info "Initializing database..."
-            /usr/pgsql-${POSTGRES_VERSION}/bin/postgresql-${POSTGRES_VERSION}-setup initdb > /dev/null 2>&1
-            
-            # Update path for psql commands
-            POSTGRES_CONF_DIR="/var/lib/pgsql/${POSTGRES_VERSION}/data"
+
+            initialize_postgresql_cluster
             
             print_success "PostgreSQL installed!"
             ;;
@@ -1112,8 +1389,12 @@ print_summary() {
     print_info ""
     print_success "Files:"
     echo "  Proxy Config:    $ZABBIX_CONF"
-    echo "  PostgreSQL:      $POSTGRES_CONF_DIR/postgresql.conf"
+    echo "  PostgreSQL Conf: $POSTGRES_CONF_DIR/postgresql.conf"
+    echo "  PostgreSQL Data: $POSTGRES_DATA_DIR"
     echo "  Log File:        /var/log/zabbix/zabbix_proxy.log"
+    if [ "$CLEANUP_PERFORMED" = "true" ]; then
+        echo "  Cleanup Backup:  $CLEANUP_BACKUP_DIR"
+    fi
     
     print_info ""
     print_success "Database:"
@@ -1171,6 +1452,7 @@ main() {
 
     check_root
     detect_distro
+    handle_previous_installation
     get_user_input
     get_performance_params "$PERFORMANCE_PROFILE"
     ensure_runtime_swap
