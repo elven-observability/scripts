@@ -1208,29 +1208,30 @@ install_zabbix() {
 import_schema() {
     print_info ""
     print_info "Importing Zabbix database schema..."
+    local schema_file
     
     # Find schema file
     if [ -f "/usr/share/zabbix-sql-scripts/postgresql/proxy.sql" ]; then
-        SCHEMA_FILE="/usr/share/zabbix-sql-scripts/postgresql/proxy.sql"
+        schema_file="/usr/share/zabbix-sql-scripts/postgresql/proxy.sql"
     elif [ -f "/usr/share/doc/zabbix-sql-scripts/postgresql/proxy.sql.gz" ]; then
         zcat /usr/share/doc/zabbix-sql-scripts/postgresql/proxy.sql.gz > /tmp/proxy.sql
         chmod 644 /tmp/proxy.sql
-        SCHEMA_FILE="/tmp/proxy.sql"
+        schema_file="/tmp/proxy.sql"
     else
         print_error "Could not find Zabbix schema file"
         exit 1
     fi
     
     # Import schema (check if already imported)
-    run_as_user postgres psql -d zabbix_proxy -c "\dt" | grep -q "hosts" && {
+    if run_as_user postgres psql -tAc "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='hosts'" zabbix_proxy 2>/dev/null | grep -q 1; then
         print_warning "Schema already imported, skipping"
-    } || {
-        run_as_user zabbix psql -v ON_ERROR_STOP=1 zabbix_proxy < "$SCHEMA_FILE" > /dev/null 2>&1
+    else
+        run_as_user zabbix psql -v ON_ERROR_STOP=1 zabbix_proxy < "$schema_file" > /dev/null 2>&1
         print_success "Schema imported!"
-    }
+    fi
     
     # Clean temp file
-    [ -f /tmp/proxy.sql ] && rm /tmp/proxy.sql
+    rm -f /tmp/proxy.sql
 }
 
 # Configure Zabbix Proxy
