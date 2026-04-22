@@ -1502,6 +1502,13 @@ LogFile=/var/log/zabbix/zabbix_proxy.log
 LogFileSize=10
 DebugLevel=3
 
+# PID file location.
+# Must match the PIDFile= directive in the systemd unit shipped by the
+# Zabbix package, otherwise systemd can't confirm the forking daemon
+# started and leaves the unit stuck in "activating" forever.
+PidFile=/run/zabbix/zabbix_proxy.pid
+SocketDir=/run/zabbix
+
 # Process Management
 StartVMwareCollectors=0
 VMwareFrequency=60
@@ -1540,15 +1547,26 @@ EOF
     build_tls_config >> "$ZABBIX_CONF"
 
     print_success "Configuration created!"
-    
+
     # Set permissions
     chown zabbix:zabbix "$ZABBIX_CONF"
     chmod 640 "$ZABBIX_CONF"
-    
+
     # Create log directory if needed
     mkdir -p /var/log/zabbix
     chown zabbix:zabbix /var/log/zabbix
     mkdir -p /var/log/snmptrap
+
+    # /run/zabbix is normally populated by the package's tmpfiles.d snippet
+    # at boot, but it may not exist yet on a fresh install or after a manual
+    # /run cleanup. Without it, zabbix_proxy cannot write its PID file and
+    # systemd leaves the service stuck in "activating".
+    mkdir -p /run/zabbix
+    chown zabbix:zabbix /run/zabbix
+    chmod 755 /run/zabbix
+    if command -v systemd-tmpfiles >/dev/null 2>&1; then
+        systemd-tmpfiles --create > /dev/null 2>&1 || true
+    fi
 }
 
 # Start Zabbix Proxy
