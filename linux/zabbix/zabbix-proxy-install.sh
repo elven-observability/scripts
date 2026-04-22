@@ -154,7 +154,7 @@ detect_distro() {
         rhel|centos|rocky|almalinux|ol)
             if command -v dnf &> /dev/null; then
                 PKG_MANAGER="dnf"
-                PKG_INSTALL="dnf install -y --setopt=install_weak_deps=False --setopt=max_parallel_downloads=1 --setopt=keepcache=0"
+                PKG_INSTALL="dnf install -y --setopt=install_weak_deps=False --setopt=max_parallel_downloads=4 --setopt=keepcache=0"
             else
                 PKG_MANAGER="yum"
                 PKG_INSTALL="yum install -y"
@@ -165,7 +165,7 @@ detect_distro() {
         amzn)
             if command -v dnf &> /dev/null; then
                 PKG_MANAGER="dnf"
-                PKG_INSTALL="dnf install -y --setopt=install_weak_deps=False --setopt=max_parallel_downloads=1 --setopt=keepcache=0"
+                PKG_INSTALL="dnf install -y --setopt=install_weak_deps=False --setopt=max_parallel_downloads=4 --setopt=keepcache=0"
             else
                 PKG_MANAGER="yum"
                 PKG_INSTALL="yum install -y"
@@ -1344,8 +1344,11 @@ install_zabbix() {
             rpm -Uvh --replacepkgs "$repo_rpm_file" > /dev/null 2>&1
             rm -f "$repo_rpm_file"
 
-            # Clean cache
-            $PKG_MANAGER clean all > /dev/null 2>&1
+            # Do NOT run `dnf clean all` here — it wipes metadata for every
+            # repo (Postgres, base, appstream, ...) and forces a full refetch
+            # on the next install, wasting a minute or more for no benefit.
+            # The install command below pulls the Zabbix repo metadata on
+            # demand anyway.
 
             run_long_step "Installing zabbix-proxy-pgsql" \
                 $PKG_INSTALL zabbix-proxy-pgsql
