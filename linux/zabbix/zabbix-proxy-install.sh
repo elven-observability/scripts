@@ -553,7 +553,7 @@ get_zabbix_repo_url() {
 }
 
 is_interactive_mode() {
-    [ -t 0 ] && [ -r /dev/tty ]
+    [ -r /dev/tty ] && [ -w /dev/tty ]
 }
 
 detect_previous_installation() {
@@ -721,7 +721,7 @@ handle_previous_installation() {
             ;;
         prompt)
             if ! is_interactive_mode; then
-                print_error "Previous installation artifacts were found, but ELVEN_CLEANUP_MODE=prompt cannot run without an interactive terminal."
+                print_error "Previous installation artifacts were found, but ELVEN_CLEANUP_MODE=prompt requires a terminal attached to /dev/tty."
                 print_info "Set ELVEN_CLEANUP_MODE=force to clean automatically or ELVEN_CLEANUP_MODE=none to continue without cleanup."
                 exit 1
             fi
