@@ -238,7 +238,9 @@ get_memory_gb() {
 
     mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     mem_gb=$((mem_kb / 1024 / 1024))
-    [ "$mem_gb" -lt 1 ] && mem_gb=1
+    if [ "$mem_gb" -lt 1 ]; then
+        mem_gb=1
+    fi
     echo "$mem_gb"
 }
 
@@ -367,6 +369,8 @@ pause_postgresql_for_low_memory_install() {
         systemctl stop postgresql
         POSTGRES_STOPPED_FOR_ZABBIX_INSTALL="true"
     fi
+
+    return 0
 }
 
 resume_postgresql_after_low_memory_install() {
@@ -401,11 +405,19 @@ validate_int_range() {
 }
 
 mode_name() {
-    [ "$1" -eq 0 ] && echo "Active" || echo "Passive"
+    if [ "$1" -eq 0 ]; then
+        echo "Active"
+    else
+        echo "Passive"
+    fi
 }
 
 server_label() {
-    [ "$PROXY_MODE" -eq 0 ] && echo "Server/Cluster" || echo "Allowed Server(s)"
+    if [ "$PROXY_MODE" -eq 0 ]; then
+        echo "Server/Cluster"
+    else
+        echo "Allowed Server(s)"
+    fi
 }
 
 server_prompt() {
@@ -440,6 +452,8 @@ validate_tls_configuration() {
         [ -n "$TLS_CERT_FILE" ] || { print_error "TLS_CERT_FILE is required when TLS_MODE=cert"; exit 1; }
         [ -n "$TLS_KEY_FILE" ] || { print_error "TLS_KEY_FILE is required when TLS_MODE=cert"; exit 1; }
     fi
+
+    return 0
 }
 
 validate_configuration() {
@@ -516,6 +530,8 @@ EOF
     if [ -n "$TLS_PSK_FILE" ]; then
         echo "TLSPSKFile=${TLS_PSK_FILE}"
     fi
+
+    return 0
 }
 
 show_mode_guidance() {
@@ -567,7 +583,11 @@ get_zabbix_repo_url() {
 }
 
 is_interactive_mode() {
-    [ -r /dev/tty ] && [ -w /dev/tty ]
+    if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+        return 0
+    fi
+
+    return 1
 }
 
 detect_previous_installation() {
@@ -637,6 +657,8 @@ detect_previous_installation() {
             append_previous_installation_finding "database role zabbix already exists"
         fi
     fi
+
+    return 0
 }
 
 print_previous_installation_summary() {
@@ -711,6 +733,8 @@ cleanup_previous_installation() {
     CLEANUP_PERFORMED="true"
     print_success "Previous installation state was cleaned up."
     print_info "Backup saved to: ${CLEANUP_BACKUP_DIR}"
+
+    return 0
 }
 
 handle_previous_installation() {
@@ -755,6 +779,8 @@ handle_previous_installation() {
             exit 1
             ;;
     esac
+
+    return 0
 }
 
 # Get user input
@@ -863,6 +889,8 @@ get_user_input() {
         print_warning "Installation cancelled"
         exit 0
     fi
+
+    return 0
 }
 
 # Get performance parameters based on profile
@@ -1009,6 +1037,8 @@ initialize_postgresql_cluster() {
             fi
             ;;
     esac
+
+    return 0
 }
 
 # Install PostgreSQL
