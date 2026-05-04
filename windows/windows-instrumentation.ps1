@@ -16,6 +16,33 @@ function Exit-WithPause {
     exit $ExitCode
 }
 
+function ConvertTo-YamlQuotedString {
+    param([AllowNull()][string]$Value)
+
+    if ($null -eq $Value) {
+        $Value = ""
+    }
+
+    $escaped = $Value.Replace("'", "''")
+    $escaped = $escaped.Replace("`r", '\r')
+    $escaped = $escaped.Replace("`n", '\n')
+    $escaped = $escaped.Replace("`t", '\t')
+
+    return "'" + $escaped + "'"
+}
+
+function Test-PrometheusLabelName {
+    param([string]$Name)
+
+    return $Name -match '^[a-zA-Z_][a-zA-Z0-9_]*$'
+}
+
+function ConvertTo-OtelFileConfigUri {
+    param([string]$Path)
+
+    return "file:$($Path.Replace('\', '/'))"
+}
+
 Write-Host "=== Windows Instrumentation Installer ===" -ForegroundColor Cyan
 Write-Host "Elven Observability - Monitoring Setup" -ForegroundColor Cyan
 Write-Host ""
@@ -32,6 +59,7 @@ $CONFIG_FILE = "$INSTALL_DIR\config.yaml"
 $OTEL_SERVICE_NAME = "otelcol"
 $EXPORTER_SERVICE_NAME = "windows_exporter"
 $EXE_PATH = "$INSTALL_DIR\otelcol-contrib.exe"
+$CONFIG_URI = ConvertTo-OtelFileConfigUri $CONFIG_FILE
 
 # ============================================================================
 # CLEANUP - Remove all previous installations to avoid conflicts
@@ -500,7 +528,15 @@ if ($env:CUSTOM_LABELS) {
     # Parse CUSTOM_LABELS="key1=value1,key2=value2"
     $env:CUSTOM_LABELS -split ',' | ForEach-Object {
         if ($_ -match '^([^=]+)=(.+)$') {
-            $CustomLabels[$matches[1]] = $matches[2]
+            $labelName = $matches[1].Trim()
+            $labelValue = $matches[2].Trim()
+
+            if (-not (Test-PrometheusLabelName $labelName)) {
+                Write-Host "  ⚠ Skipping invalid label name: $labelName" -ForegroundColor Yellow
+                Write-Host "    Use Prometheus label format: letters, numbers, and underscore; cannot start with a number." -ForegroundColor Yellow
+            } else {
+                $CustomLabels[$labelName] = $labelValue
+            }
         }
     }
     
@@ -520,9 +556,15 @@ if ($env:CUSTOM_LABELS) {
             if ([string]::IsNullOrWhiteSpace($labelName)) {
                 break
             }
+            $labelName = $labelName.Trim()
+            if (-not (Test-PrometheusLabelName $labelName)) {
+                Write-Host "  ⚠ Invalid label name: $labelName" -ForegroundColor Yellow
+                Write-Host "    Use only letters, numbers, and underscore; do not start with a number." -ForegroundColor Yellow
+                continue
+            }
             $labelValue = Read-Host "  Label value"
             if (-not [string]::IsNullOrWhiteSpace($labelValue)) {
-                $CustomLabels[$labelName] = $labelValue
+                $CustomLabels[$labelName] = $labelValue.Trim()
                 Write-Host "  ✓ Added: $labelName = $labelValue" -ForegroundColor Green
             }
         }
@@ -1202,26 +1244,35 @@ Write-Host "✓ Executable found!" -ForegroundColor Green
 # Create Collector configuration
 Write-Host "Creating Collector configuration..." -ForegroundColor Green
 
+$mimirEndpointYaml = ConvertTo-YamlQuotedString $MIMIR_ENDPOINT
+$tenantIdYaml = ConvertTo-YamlQuotedString $TENANT_ID
+$authorizationYaml = ConvertTo-YamlQuotedString "Bearer $API_TOKEN_PLAIN"
+$instanceNameYaml = ConvertTo-YamlQuotedString $INSTANCE_NAME
+$environmentYaml = ConvertTo-YamlQuotedString $ENVIRONMENT
+
 # Build customer label if provided
 $customerLabel = ""
 if (-not [string]::IsNullOrWhiteSpace($CUSTOMER_NAME)) {
+    $customerNameYaml = ConvertTo-YamlQuotedString $CUSTOMER_NAME
     $customerLabel = @"
 
       - action: insert
-        key: customer
-        value: "$CUSTOMER_NAME"
+        key: "customer"
+        value: $customerNameYaml
 "@
 }
 
 # Build custom labels if provided
 $customLabelsYaml = ""
 if ($CustomLabels.Count -gt 0) {
-    foreach ($key in $CustomLabels.Keys) {
+    foreach ($key in ($CustomLabels.Keys | Sort-Object)) {
+        $keyYaml = ConvertTo-YamlQuotedString $key
+        $valueYaml = ConvertTo-YamlQuotedString $CustomLabels[$key]
         $customLabelsYaml += @"
 
       - action: insert
-        key: $key
-        value: "$($CustomLabels[$key])"
+        key: $keyYaml
+        value: $valueYaml
 "@
     }
 }
@@ -1238,10 +1289,10 @@ receivers:
 
 exporters:
   prometheusremotewrite:
-    endpoint: $MIMIR_ENDPOINT
+    endpoint: $mimirEndpointYaml
     headers:
-      X-Scope-OrgID: "$TENANT_ID"
-      Authorization: "Bearer $API_TOKEN_PLAIN"
+      X-Scope-OrgID: $tenantIdYaml
+      Authorization: $authorizationYaml
     resource_to_telemetry_conversion:
       enabled: true
 
@@ -1249,13 +1300,13 @@ processors:
   resource/add_labels:
     attributes:
       - action: insert
-        key: hostname
-        value: "$INSTANCE_NAME"
+        key: "hostname"
+        value: $instanceNameYaml
       - action: insert
-        key: environment
-        value: "$ENVIRONMENT"$customerLabel
+        key: "environment"
+        value: $environmentYaml$customerLabel
       - action: insert
-        key: os
+        key: "os"
         value: "windows"$customLabelsYaml
 
   batch:
@@ -1288,7 +1339,7 @@ Write-Host "✓ Configuration created!" -ForegroundColor Green
 # Validate configuration
 Write-Host "Validating configuration..." -ForegroundColor Green
 try {
-    $validateOutput = & $EXE_PATH validate --config=$CONFIG_FILE 2>&1
+    $validateOutput = & $EXE_PATH validate "--config=$CONFIG_URI" 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Host "✓ Configuration is valid!" -ForegroundColor Green
     } else {
@@ -1313,7 +1364,7 @@ if ($existingService) {
 
 # Create Collector service
 Write-Host "Creating OpenTelemetry Collector service..." -ForegroundColor Green
-$FULL_COMMAND = "`"$EXE_PATH`" --config=`"$CONFIG_FILE`""
+$FULL_COMMAND = "`"$EXE_PATH`" --config=`"$CONFIG_URI`""
 
 try {
     New-Service -Name $OTEL_SERVICE_NAME `
@@ -1369,8 +1420,8 @@ try {
             }
         Write-Host ""
         Write-Host "Troubleshooting:" -ForegroundColor Yellow
-        Write-Host "  1. Validate config: & '$EXE_PATH' validate --config='$CONFIG_FILE'" -ForegroundColor White
-        Write-Host "  2. Test manually: & '$EXE_PATH' --config='$CONFIG_FILE'" -ForegroundColor White
+        Write-Host "  1. Validate config: & '$EXE_PATH' validate --config='$CONFIG_URI'" -ForegroundColor White
+        Write-Host "  2. Test manually: & '$EXE_PATH' --config='$CONFIG_URI'" -ForegroundColor White
         Write-Host "  3. Check config file: notepad '$CONFIG_FILE'" -ForegroundColor White
         Write-Host ""
         Exit-WithPause 1
@@ -1476,11 +1527,11 @@ Write-Host "       Start-Service windows_exporter" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  If OpenTelemetry Collector won't start:" -ForegroundColor White
 Write-Host "    1. Validate config:" -ForegroundColor Gray
-Write-Host "       & 'C:\Program Files\OpenTelemetry Collector\otelcol-contrib.exe' validate --config='C:\Program Files\OpenTelemetry Collector\config.yaml'" -ForegroundColor Gray
+Write-Host "       & 'C:\Program Files\OpenTelemetry Collector\otelcol-contrib.exe' validate --config='file:C:/Program Files/OpenTelemetry Collector/config.yaml'" -ForegroundColor Gray
 Write-Host "    2. Check event logs:" -ForegroundColor Gray
 Write-Host "       Get-WinEvent -LogName Application -MaxEvents 20 | Where {`$_.Message -like '*otelcol*'}" -ForegroundColor Gray
 Write-Host "    3. Test manually:" -ForegroundColor Gray
-Write-Host "       & 'C:\Program Files\OpenTelemetry Collector\otelcol-contrib.exe' --config='C:\Program Files\OpenTelemetry Collector\config.yaml'" -ForegroundColor Gray
+Write-Host "       & 'C:\Program Files\OpenTelemetry Collector\otelcol-contrib.exe' --config='file:C:/Program Files/OpenTelemetry Collector/config.yaml'" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  Complete uninstall:" -ForegroundColor White
 Write-Host "    Stop-Service windows_exporter, otelcol -Force" -ForegroundColor Gray
