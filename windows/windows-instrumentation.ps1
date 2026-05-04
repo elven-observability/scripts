@@ -43,6 +43,45 @@ function ConvertTo-OtelFileConfigUri {
     return "file:$($Path.Replace('\', '/'))"
 }
 
+function ConvertFrom-SecureStringToPlainText {
+    param([securestring]$SecureString)
+
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureString)
+    try {
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    } finally {
+        if ($bstr -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
+    }
+}
+
+function Normalize-ApiToken {
+    param([AllowNull()][string]$Token)
+
+    if ($null -eq $Token) {
+        return ""
+    }
+
+    $normalized = $Token.Trim()
+
+    if ($normalized -match '^\s*Authorization\s*:\s*Bearer\s+(.+)$') {
+        $normalized = $matches[1].Trim()
+        Write-Host "  → Removed Authorization/Bearer prefix from token input" -ForegroundColor Cyan
+    } elseif ($normalized -match '^\s*Bearer\s+(.+)$') {
+        $normalized = $matches[1].Trim()
+        Write-Host "  → Removed Bearer prefix from token input" -ForegroundColor Cyan
+    }
+
+    if (($normalized.StartsWith('"') -and $normalized.EndsWith('"')) -or
+        ($normalized.StartsWith("'") -and $normalized.EndsWith("'"))) {
+        $normalized = $normalized.Substring(1, $normalized.Length - 2).Trim()
+        Write-Host "  → Removed surrounding quotes from token input" -ForegroundColor Cyan
+    }
+
+    return $normalized
+}
+
 Write-Host "=== Windows Instrumentation Installer ===" -ForegroundColor Cyan
 Write-Host "Elven Observability - Monitoring Setup" -ForegroundColor Cyan
 Write-Host ""
@@ -475,9 +514,13 @@ do {
 # API Token
 do {
     $API_TOKEN = Read-Host "API Token" -AsSecureString
-    $API_TOKEN_PLAIN = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($API_TOKEN))
+    $API_TOKEN_PLAIN = Normalize-ApiToken (ConvertFrom-SecureStringToPlainText $API_TOKEN)
     if ([string]::IsNullOrWhiteSpace($API_TOKEN_PLAIN)) {
         Write-Host "  ✗ API Token cannot be empty!" -ForegroundColor Red
+    } elseif ($API_TOKEN_PLAIN -match '\s') {
+        Write-Host "  ⚠ API Token contains whitespace after normalization; please verify the pasted value." -ForegroundColor Yellow
+    } else {
+        Write-Host "  ✓ API Token captured ($($API_TOKEN_PLAIN.Length) characters)" -ForegroundColor Green
     }
 } while ([string]::IsNullOrWhiteSpace($API_TOKEN_PLAIN))
 
