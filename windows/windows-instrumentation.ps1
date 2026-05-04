@@ -82,6 +82,26 @@ function Normalize-ApiToken {
     return $normalized
 }
 
+function Get-EnvValue {
+    param([string[]]$Names)
+
+    foreach ($name in $Names) {
+        $value = [Environment]::GetEnvironmentVariable($name, "Process")
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            return $value.Trim()
+        }
+    }
+
+    return ""
+}
+
+function Test-EnvFlag {
+    param([string[]]$Names)
+
+    $value = Get-EnvValue $Names
+    return $value -match '^(1|true|yes|y)$'
+}
+
 Write-Host "=== Windows Instrumentation Installer ===" -ForegroundColor Cyan
 Write-Host "Elven Observability - Monitoring Setup" -ForegroundColor Cyan
 Write-Host ""
@@ -504,41 +524,75 @@ Write-Host "Configuration:" -ForegroundColor Yellow
 Write-Host ""
 
 # Tenant ID
-do {
-    $TENANT_ID = Read-Host "Tenant ID"
-    if ([string]::IsNullOrWhiteSpace($TENANT_ID)) {
-        Write-Host "  ✗ Tenant ID cannot be empty!" -ForegroundColor Red
-    }
-} while ([string]::IsNullOrWhiteSpace($TENANT_ID))
+$TENANT_ID = Get-EnvValue @("ELVEN_TENANT_ID", "TENANT_ID")
+if (-not [string]::IsNullOrWhiteSpace($TENANT_ID)) {
+    Write-Host "  ✓ Using Tenant ID from environment" -ForegroundColor Green
+} else {
+    do {
+        $TENANT_ID = Read-Host "Tenant ID"
+        if ([string]::IsNullOrWhiteSpace($TENANT_ID)) {
+            Write-Host "  ✗ Tenant ID cannot be empty!" -ForegroundColor Red
+        }
+    } while ([string]::IsNullOrWhiteSpace($TENANT_ID))
+}
 
 # API Token
-do {
-    $API_TOKEN = Read-Host "API Token" -AsSecureString
-    $API_TOKEN_PLAIN = Normalize-ApiToken (ConvertFrom-SecureStringToPlainText $API_TOKEN)
-    if ([string]::IsNullOrWhiteSpace($API_TOKEN_PLAIN)) {
-        Write-Host "  ✗ API Token cannot be empty!" -ForegroundColor Red
-    } elseif ($API_TOKEN_PLAIN -match '\s') {
-        Write-Host "  ⚠ API Token contains whitespace after normalization; please verify the pasted value." -ForegroundColor Yellow
-    } else {
-        Write-Host "  ✓ API Token captured ($($API_TOKEN_PLAIN.Length) characters)" -ForegroundColor Green
-    }
-} while ([string]::IsNullOrWhiteSpace($API_TOKEN_PLAIN))
+$apiTokenInput = Get-EnvValue @("ELVEN_API_TOKEN", "API_TOKEN")
+$apiTokenFromEnv = -not [string]::IsNullOrWhiteSpace($apiTokenInput)
+$API_TOKEN_PLAIN = Normalize-ApiToken $apiTokenInput
+if ($apiTokenFromEnv -and -not [string]::IsNullOrWhiteSpace($API_TOKEN_PLAIN)) {
+    Write-Host "  ✓ Using API Token from environment ($($API_TOKEN_PLAIN.Length) characters)" -ForegroundColor Green
+} else {
+    do {
+        $API_TOKEN = Read-Host "API Token" -AsSecureString
+        $API_TOKEN_PLAIN = Normalize-ApiToken (ConvertFrom-SecureStringToPlainText $API_TOKEN)
+        if ([string]::IsNullOrWhiteSpace($API_TOKEN_PLAIN)) {
+            Write-Host "  ✗ API Token cannot be empty!" -ForegroundColor Red
+        }
+    } while ([string]::IsNullOrWhiteSpace($API_TOKEN_PLAIN))
+}
+
+if ($API_TOKEN_PLAIN -match '\s') {
+    Write-Host "  ⚠ API Token contains whitespace after normalization; please verify the pasted value." -ForegroundColor Yellow
+} elseif (-not $apiTokenFromEnv) {
+    Write-Host "  ✓ API Token captured ($($API_TOKEN_PLAIN.Length) characters)" -ForegroundColor Green
+}
+
+$AUTO_CONFIRM = Test-EnvFlag @("ELVEN_AUTO_CONFIRM", "AUTO_CONFIRM")
+if ($AUTO_CONFIRM) {
+    Write-Host "  ✓ Auto-confirm enabled from environment" -ForegroundColor Green
+}
 
 # Instance name with default
-$INSTANCE_NAME = Read-Host "Instance name (e.g., server-01) [default: $(hostname)]"
+$INSTANCE_NAME = Get-EnvValue @("ELVEN_INSTANCE_NAME", "INSTANCE_NAME")
+if (-not [string]::IsNullOrWhiteSpace($INSTANCE_NAME)) {
+    Write-Host "  ✓ Using instance name from environment: $INSTANCE_NAME" -ForegroundColor Green
+} elseif (-not $AUTO_CONFIRM) {
+    $INSTANCE_NAME = Read-Host "Instance name (e.g., server-01) [default: $(hostname)]"
+}
 if ([string]::IsNullOrWhiteSpace($INSTANCE_NAME)) {
     $INSTANCE_NAME = $env:COMPUTERNAME.ToLower()
     Write-Host "  → Using hostname: $INSTANCE_NAME" -ForegroundColor Cyan
 }
 
 # Customer name (optional)
-$CUSTOMER_NAME = Read-Host "Customer/Company name (optional) [default: none]"
+$CUSTOMER_NAME = Get-EnvValue @("ELVEN_CUSTOMER_NAME", "CUSTOMER_NAME")
+if (-not [string]::IsNullOrWhiteSpace($CUSTOMER_NAME)) {
+    Write-Host "  ✓ Using customer name from environment: $CUSTOMER_NAME" -ForegroundColor Green
+} elseif (-not $AUTO_CONFIRM) {
+    $CUSTOMER_NAME = Read-Host "Customer/Company name (optional) [default: none]"
+}
 if ([string]::IsNullOrWhiteSpace($CUSTOMER_NAME)) {
     $CUSTOMER_NAME = ""
 }
 
 # Environment with default
-$ENVIRONMENT = Read-Host "Environment (production/staging/dev) [default: production]"
+$ENVIRONMENT = Get-EnvValue @("ELVEN_ENVIRONMENT", "ENVIRONMENT")
+if (-not [string]::IsNullOrWhiteSpace($ENVIRONMENT)) {
+    Write-Host "  ✓ Using environment from environment variable: $ENVIRONMENT" -ForegroundColor Green
+} elseif (-not $AUTO_CONFIRM) {
+    $ENVIRONMENT = Read-Host "Environment (production/staging/dev) [default: production]"
+}
 if ([string]::IsNullOrWhiteSpace($ENVIRONMENT)) {
     $ENVIRONMENT = "production"
     Write-Host "  → Using default: $ENVIRONMENT" -ForegroundColor Cyan
@@ -546,18 +600,27 @@ if ([string]::IsNullOrWhiteSpace($ENVIRONMENT)) {
 
 # Mimir endpoint with default
 Write-Host ""
+$MIMIR_ENDPOINT = Get-EnvValue @("ELVEN_MIMIR_ENDPOINT", "MIMIR_ENDPOINT")
 do {
-    $MIMIR_ENDPOINT = Read-Host "Mimir endpoint [default: https://mimir.elvenobservability.com/api/v1/push]"
+    if ([string]::IsNullOrWhiteSpace($MIMIR_ENDPOINT)) {
+        if (-not $AUTO_CONFIRM) {
+            $MIMIR_ENDPOINT = Read-Host "Mimir endpoint [default: https://mimir.elvenobservability.com/api/v1/push]"
+        }
+    } else {
+        Write-Host "  ✓ Using Mimir endpoint from environment: $MIMIR_ENDPOINT" -ForegroundColor Green
+    }
+
     if ([string]::IsNullOrWhiteSpace($MIMIR_ENDPOINT)) {
         $MIMIR_ENDPOINT = "https://mimir.elvenobservability.com/api/v1/push"
         Write-Host "  → Using default (SaaS): $MIMIR_ENDPOINT" -ForegroundColor Cyan
         break
     } elseif ($MIMIR_ENDPOINT -match '^https?://') {
-        Write-Host "  → Using custom endpoint: $MIMIR_ENDPOINT" -ForegroundColor Cyan
+        Write-Host "  → Using endpoint: $MIMIR_ENDPOINT" -ForegroundColor Cyan
         break
     } else {
         Write-Host "  ✗ Endpoint must start with http:// or https://" -ForegroundColor Red
         Write-Host "    Example: https://metrics.vibraenergia.com.br/api/v1/push" -ForegroundColor Yellow
+        $MIMIR_ENDPOINT = ""
     }
 } while ($true)
 
@@ -566,10 +629,11 @@ Write-Host ""
 $CustomLabels = @{}
 
 # Check if CUSTOM_LABELS env var is set
-if ($env:CUSTOM_LABELS) {
+$customLabelsInput = Get-EnvValue @("ELVEN_CUSTOM_LABELS", "CUSTOM_LABELS")
+if (-not [string]::IsNullOrWhiteSpace($customLabelsInput)) {
     Write-Host "Using custom labels from environment variable..." -ForegroundColor Cyan
     # Parse CUSTOM_LABELS="key1=value1,key2=value2"
-    $env:CUSTOM_LABELS -split ',' | ForEach-Object {
+    $customLabelsInput -split ',' | ForEach-Object {
         if ($_ -match '^([^=]+)=(.+)$') {
             $labelName = $matches[1].Trim()
             $labelValue = $matches[2].Trim()
@@ -589,7 +653,7 @@ if ($env:CUSTOM_LABELS) {
             Write-Host "    $key`: $($CustomLabels[$key])" -ForegroundColor White
         }
     }
-} else {
+} elseif (-not $AUTO_CONFIRM) {
     # Interactive mode
     $addLabels = Read-Host "Add custom labels? (e.g., group=BASPA, dept=TI) [y/n]"
     if ($addLabels -eq "y" -or $addLabels -eq "Y") {
@@ -635,7 +699,10 @@ if ($CustomLabels.Count -gt 0) {
 }
 Write-Host ""
 
-$confirm = Read-Host "Confirm and continue? (y/n)"
+$confirm = if ($AUTO_CONFIRM) { "yes" } else { Read-Host "Confirm and continue? (y/n)" }
+if ($AUTO_CONFIRM) {
+    Write-Host "  → Auto-confirmed by environment" -ForegroundColor Cyan
+}
 if ($confirm -ne "y" -and $confirm -ne "Y" -and $confirm -ne "yes") {
     Write-Host "Installation cancelled." -ForegroundColor Yellow
     Exit-WithPause 0
