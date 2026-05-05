@@ -7,15 +7,16 @@ Automated installers for monitoring infrastructure across **Windows** and **Linu
 These scripts provide one-liner installation of observability agents for the **Elven Observability LGTM Stack**:
 
 - **Windows**: Windows Exporter + OpenTelemetry Collector
+- **Windows**: elven-logs-collector -> Loki
 - **Linux**: Node Exporter + OpenTelemetry Collector
 - **Linux**: Faro Collector (Frontend Instrumentation → Loki)
 - **Linux**: Zabbix Proxy 7.0 LTS + PostgreSQL 17 (for Zabbix monitoring infrastructure)
 
-The instrumentation scripts automatically install, configure, and start monitoring services that send metrics to your Elven Observability Mimir instance (or logs to Loki for the Faro Collector). The Zabbix Proxy script sets up a complete Zabbix proxy infrastructure with PostgreSQL database.
+The instrumentation scripts automatically install, configure, and start monitoring services that send metrics to your Elven Observability Mimir instance or logs to Loki with elven-logs-collector/Faro collectors. The Zabbix Proxy script sets up a complete Zabbix proxy infrastructure with PostgreSQL database.
 
 ## 🚀 Quick Start
 
-### Windows
+### Windows (Metrics)
 
 Open **PowerShell as Administrator**:
 
@@ -24,6 +25,16 @@ iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/win
 ```
 
 📖 [Full Windows Documentation](./windows/)
+
+### Windows (elven-logs-collector)
+
+Open **PowerShell as Administrator**:
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 | iex
+```
+
+📖 [elven-logs-collector Documentation](./windows/elven-logs-collector/)
 
 ### Linux (Node Exporter + OTel Collector)
 
@@ -118,7 +129,9 @@ Server (Windows/Linux)
 scripts/
 ├── windows/
 │   ├── windows-instrumentation.ps1     # Windows Exporter + OTel Collector
-│   ├── windows-instrumentation-7zip.ps1
+│   ├── elven-logs-collector/
+│   │   ├── windows-logs-instrumentation.ps1
+│   │   └── README.md
 │   └── README.md
 └── linux/
     ├── README.md
@@ -133,7 +146,7 @@ scripts/
 
 ## 🔧 Configuration
 
-Both scripts prompt for:
+The interactive installers prompt for:
 
 | Parameter | Description | Default | Required |
 |-----------|-------------|---------|----------|
@@ -199,6 +212,11 @@ Simply re-run the installation script. It will:
 ### Windows
 ```powershell
 iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/windows-instrumentation.ps1 | iex
+```
+
+### Windows (elven-logs-collector)
+```powershell
+iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 | iex
 ```
 
 ### Linux
@@ -274,7 +292,7 @@ Ensure outbound HTTPS (443) is allowed to:
 
 - ✅ Scripts install only from official GitHub releases
 - ✅ All downloads use HTTPS
-- ✅ API tokens are stored in config files with restricted permissions
+- ✅ Metrics tokens are stored in restricted configs; elven-logs-collector stores the token in the service registry environment, not in `config.alloy`
 - ✅ Services run with minimal required privileges
 - ⚠️ Review scripts before running in production (always good practice)
 
@@ -285,6 +303,7 @@ Ensure outbound HTTPS (443) is allowed to:
 | Windows Exporter | 0.27.3 | [prometheus-community/windows_exporter](https://github.com/prometheus-community/windows_exporter) |
 | Node Exporter | 1.8.2 | [prometheus/node_exporter](https://github.com/prometheus/node_exporter) |
 | OpenTelemetry Collector | 0.114.0 | [open-telemetry/opentelemetry-collector-releases](https://github.com/open-telemetry/opentelemetry-collector-releases) |
+| elven-logs-collector runtime | 1.16.0 | [grafana/alloy](https://github.com/grafana/alloy) |
 
 ## 🌐 Supported Platforms
 
@@ -339,6 +358,15 @@ We welcome contributions! Please:
 | **Restart** | `Restart-Service otelcol` | `sudo systemctl restart otelcol` |
 | **Logs** | `Get-WinEvent` | `journalctl -u otelcol -f` |
 | **Test Exporter** | `curl http://localhost:9182/metrics` | `curl http://localhost:9100/metrics` |
+
+### elven-logs-collector
+
+| Task | Command |
+|------|---------|
+| **Install** | `iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 \| iex` |
+| **Check Status** | `Get-Service Alloy` |
+| **Restart** | `Restart-Service Alloy` |
+| **Validate Config** | `& "$env:ProgramFiles\GrafanaLabs\Alloy\alloy.exe" validate --stability.level=generally-available "$env:ProgramFiles\GrafanaLabs\Alloy\config.alloy"` |
 
 ### Collector FE – Faro (Linux)
 

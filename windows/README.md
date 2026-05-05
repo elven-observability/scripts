@@ -1,8 +1,13 @@
 # Windows Instrumentation - Elven Observability
 
-Automated installer for **Windows Exporter** + **OpenTelemetry Collector** on Windows servers.
+Automated installers for Windows observability on Windows servers.
+
+- **Metrics**: Windows Exporter + OpenTelemetry Collector
+- **Logs**: elven-logs-collector -> Loki
 
 ## 🚀 Quick Installation
+
+### Metrics
 
 ### Option 1: One-liner (direct execution)
 
@@ -22,6 +27,28 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/elven-observability/scr
 .\install.ps1
 ```
 
+### Logs with elven-logs-collector
+
+Open PowerShell as **Administrator** and run:
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 | iex
+```
+
+For automated installs:
+
+```powershell
+$env:ELVEN_TENANT_ID = "your-tenant-id"
+$env:ELVEN_API_TOKEN = "your-token-without-bearer"
+$env:ELVEN_INSTANCE_NAME = $env:COMPUTERNAME.ToLower()
+$env:ELVEN_ENVIRONMENT = "production"
+$env:ELVEN_AUTO_CONFIRM = "true"
+
+iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 | iex
+```
+
+Full logs documentation: [elven-logs-collector](./elven-logs-collector/)
+
 ## 📋 Prerequisites
 
 - ✅ Windows Server 2016+ or Windows 10/11
@@ -29,10 +56,11 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/elven-observability/scr
 - ✅ Run as **Administrator**
 - ✅ Internet access
 
-## 🔧 What does the script install?
+## 🔧 What do the scripts install?
 
 1. **Windows Exporter (v0.27.3)** - Collects Windows system metrics
 2. **OpenTelemetry Collector (v0.114.0)** - Scrapes and forwards metrics to Mimir
+3. **elven-logs-collector runtime (v1.16.0)** - Collects Windows Event Logs and optional file logs, then forwards them to Loki
 
 ## 📊 Metrics collected
 
@@ -107,12 +135,12 @@ Get-WinEvent -LogName Application -MaxEvents 20 | Where-Object {$_.Message -like
 
 ## 🔒 Security
 
-The script:
+The scripts:
 - ✅ Validates downloads before execution
 - ✅ Uses TLS 1.2 for all connections
 - ✅ Installs only from official sources (GitHub releases)
 - ✅ Validates configuration before starting services
-- ⚠️ Stores API token in collector config file (file permissions: SYSTEM only)
+- ⚠️ Metrics token is stored in the OpenTelemetry Collector config; elven-logs-collector stores the token in the Alloy service registry environment, not in `config.alloy`
 
 ## 🏗️ Architecture
 
