@@ -242,6 +242,7 @@ $tempFiles = @(
     "$env:TEMP\windows_exporter*.msi",
     "$env:TEMP\otelcol*.tar.gz",
     "$env:TEMP\otelcol*.zip",
+    "$env:TEMP\otelcol*.msi",
     "C:\temp\windows_exporter*.msi",
     "C:\temp\otelcol*.tar.gz"
 )
@@ -441,11 +442,7 @@ function Test-Prerequisites {
     if ($hasTar) {
         Write-Host "   → Will use tar for extraction (modern system)" -ForegroundColor Cyan
     } else {
-        if ($psVersion.Major -ge 5) {
-            Write-Host "   → Will use Expand-Archive for extraction (PowerShell 5+)" -ForegroundColor Cyan
-        } elseif ($psVersion.Major -eq 4) {
-            Write-Host "   → Will use .NET for extraction (PowerShell 4 / Server 2012 R2)" -ForegroundColor Cyan
-        }
+        Write-Host "   → Will use official MSI extraction fallback (legacy system)" -ForegroundColor Cyan
     }
     
     Write-Host ""
@@ -529,6 +526,61 @@ function Download-WithRetry {
     }
     
     return $false
+}
+
+function Install-OtelCollectorFromMsi {
+    param(
+        [string]$MsiUrl,
+        [string]$MsiPath,
+        [string]$InstallDir,
+        [string]$ExePath
+    )
+
+    Write-Host "  Using official MSI administrative extraction fallback..." -ForegroundColor Cyan
+
+    if (-not (Download-WithRetry -Url $MsiUrl -OutputPath $MsiPath)) {
+        Write-Host "✗ Failed to download Collector MSI after multiple attempts." -ForegroundColor Red
+        Write-Host "  URL tried: $MsiUrl" -ForegroundColor Yellow
+        return $false
+    }
+
+    $msiExtractDir = Join-Path $env:TEMP "otelcol-msi-extract"
+    Remove-Item $msiExtractDir -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $msiExtractDir | Out-Null
+
+    try {
+        Write-Host "  Extracting MSI with msiexec..." -ForegroundColor Cyan
+        $msiArgs = "/a `"$MsiPath`" /qn TARGETDIR=`"$msiExtractDir`""
+        $msiProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru -NoNewWindow -ErrorAction Stop
+
+        if ($msiProcess.ExitCode -ne 0 -and $msiProcess.ExitCode -ne 3010) {
+            Write-Host "✗ MSI extraction failed with exit code $($msiProcess.ExitCode)." -ForegroundColor Red
+            return $false
+        }
+
+        $extractedExe = Get-ChildItem -Path $msiExtractDir -Filter "otelcol-contrib.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $extractedExe) {
+            Write-Host "✗ MSI extraction completed, but otelcol-contrib.exe was not found." -ForegroundColor Red
+            return $false
+        }
+
+        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+        Copy-Item -Path $extractedExe.FullName -Destination $ExePath -Force
+
+        if ((Test-Path $ExePath) -and ((Get-Item $ExePath).Length -gt 0)) {
+            $fileSize = (Get-Item $ExePath).Length / 1MB
+            Write-Host "✓ Collector extracted from MSI ($([math]::Round($fileSize, 2)) MB)" -ForegroundColor Green
+            return $true
+        }
+
+        Write-Host "✗ Copied collector executable was not found or is empty." -ForegroundColor Red
+        return $false
+    } catch {
+        Write-Host "✗ Error during MSI extraction: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    } finally {
+        Remove-Item $msiExtractDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 try {
@@ -1081,283 +1133,76 @@ if (Test-Path $EXE_PATH) {
 # Download Collector
 Write-Host "Downloading OpenTelemetry Collector v$OTEL_VERSION..." -ForegroundColor Green
 
-# OpenTelemetry only provides .tar.gz for all platforms including Windows
-$OTEL_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/otelcol-contrib_${OTEL_VERSION}_windows_amd64.tar.gz"
+# Official release assets used by this installer.
+$OTEL_ARCHIVE_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/otelcol-contrib_${OTEL_VERSION}_windows_amd64.tar.gz"
+$OTEL_MSI_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/otelcol-contrib_${OTEL_VERSION}_windows_x64.msi"
 $OTEL_PATH = "$env:TEMP\otelcol.tar.gz"
+$OTEL_MSI_PATH = "$env:TEMP\otelcol-contrib.msi"
 
-# Check if tar command is available (Windows 10 1803+ / Server 2019+)
+# Windows 10 1803+ / Server 2019+ include tar. Legacy hosts use MSI extraction.
 $hasTar = $null -ne (Get-Command tar -ErrorAction SilentlyContinue)
+$collectorExtracted = $false
 
-if (-not $hasTar) {
-    # Try to download standalone tar.exe for legacy systems
-    Write-Host "  tar command not found - attempting to download standalone tar.exe..." -ForegroundColor Yellow
-    
-    $tarExePath = "$env:TEMP\tar.exe"
-    $tarDownloadUrl = "https://github.com/git-for-windows/git/releases/download/v2.43.0.windows.1/MinGit-2.43.0-64-bit.zip"
-    
-    try {
-        # Download MinGit which includes tar.exe
-        Write-Host "    → Downloading tar.exe from Git for Windows..." -ForegroundColor Cyan
-        $minGitPath = "$env:TEMP\mingit.zip"
-        
-        if (Download-WithRetry -Url $tarDownloadUrl -OutputPath $minGitPath -MaxRetries 2) {
-            # Extract just the tar.exe we need
-            Write-Host "    → Extracting tar.exe..." -ForegroundColor Cyan
-            
-            if ($PSVersionTable.PSVersion.Major -ge 5) {
-                # Use Expand-Archive in PS5+
-                $extractPath = "$env:TEMP\mingit"
-                Expand-Archive -Path $minGitPath -DestinationPath $extractPath -Force
-                
-                # Find tar.exe in the extracted files
-                $tarInMinGit = Get-ChildItem -Path $extractPath -Filter "tar.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-                
-                if ($tarInMinGit) {
-                    Copy-Item $tarInMinGit.FullName -Destination $tarExePath -Force
-                    $hasTar = Test-Path $tarExePath
-                    
-                    if ($hasTar) {
-                        Write-Host "    ✓ tar.exe downloaded successfully!" -ForegroundColor Green
-                        # Add tar to PATH temporarily for this session
-                        $env:PATH = "$env:TEMP;$env:PATH"
-                    }
-                }
-                
-                # Cleanup
-                Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            
-            Remove-Item $minGitPath -Force -ErrorAction SilentlyContinue
-        }
-    } catch {
-        Write-Host "    ⚠ Could not download tar.exe: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host "    Will use PowerShell-based extraction instead" -ForegroundColor Cyan
-    }
-}
-
-if ($hasTar) {
-    $tarCommand = if (Test-Path "$env:TEMP\tar.exe") { "$env:TEMP\tar.exe" } else { "tar" }
-    Write-Host "  Using tar for extraction" -ForegroundColor Cyan
-} else {
-    Write-Host "  Using PowerShell-based extraction (legacy system)" -ForegroundColor Cyan
-}
-
-if (-not (Download-WithRetry -Url $OTEL_URL -OutputPath $OTEL_PATH)) {
-    Write-Host "✗ Failed to download Collector after multiple attempts." -ForegroundColor Red
-    Write-Host "  URL tried: $OTEL_URL" -ForegroundColor Yellow
-    Write-Host "" -ForegroundColor Red
-    Write-Host "Troubleshooting:" -ForegroundColor Yellow
-    Write-Host "  1. Verify the version exists: https://github.com/open-telemetry/opentelemetry-collector-releases/releases/tag/v$OTEL_VERSION" -ForegroundColor White
-    Write-Host "  2. Check internet connection" -ForegroundColor White
-    Write-Host "  3. Try downloading manually and place in: $INSTALL_DIR" -ForegroundColor White
-    Exit-WithPause 1
-}
-
-# Extract with appropriate method
 Write-Host "Extracting files..." -ForegroundColor Green
 
 if ($hasTar) {
-    # Use tar command (either native or downloaded)
-    try {
-        Write-Host "  Using tar command..." -ForegroundColor Cyan
-        
-        if (Test-Path "$env:TEMP\tar.exe") {
-            $tarOutput = & "$env:TEMP\tar.exe" -xzf $OTEL_PATH -C $INSTALL_DIR 2>&1
-        } else {
+    Write-Host "  Using native tar for extraction" -ForegroundColor Cyan
+
+    if (-not (Download-WithRetry -Url $OTEL_ARCHIVE_URL -OutputPath $OTEL_PATH)) {
+        Write-Host "✗ Failed to download Collector archive after multiple attempts." -ForegroundColor Red
+        Write-Host "  URL tried: $OTEL_ARCHIVE_URL" -ForegroundColor Yellow
+    } else {
+        try {
             $tarOutput = tar -xzf $OTEL_PATH -C $INSTALL_DIR 2>&1
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $EXE_PATH)) {
+                Write-Host "✓ Extraction complete with tar!" -ForegroundColor Green
+                $collectorExtracted = $true
+            } else {
+                Write-Host "  ⚠ tar extraction did not produce the expected executable." -ForegroundColor Yellow
+                Write-Host "  tar exit code: $LASTEXITCODE" -ForegroundColor Yellow
+                if ($tarOutput) {
+                    Write-Host "  Output: $tarOutput" -ForegroundColor Gray
+                }
+            }
+        } catch {
+            Write-Host "  ⚠ Error during tar extraction: $($_.Exception.Message)" -ForegroundColor Yellow
         }
-        
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "✓ Extraction complete with tar!" -ForegroundColor Green
-        } else {
-            Write-Host "  ⚠ tar exit code: $LASTEXITCODE" -ForegroundColor Yellow
-            Write-Host "  Output: $tarOutput" -ForegroundColor Gray
-        }
-    } catch {
-        Write-Host "  ⚠ Error during tar extraction: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host "  Falling back to PowerShell extraction..." -ForegroundColor Cyan
-        $hasTar = $false  # Force PowerShell extraction as fallback
     }
 } else {
-    # Legacy systems (2012 R2, 2016): extract .tar.gz using PowerShell
-    # This is a two-step process: first decompress gzip, then extract tar
-    try {
-        Write-Host "  Using PowerShell to extract .tar.gz (legacy system)..." -ForegroundColor Cyan
-        
-        # Step 1: Decompress .gz to .tar using .NET
-        Write-Host "    → Decompressing .gz..." -ForegroundColor Gray
-        $tarPath = "$env:TEMP\otelcol.tar"
-        
-        try {
-            Add-Type -AssemblyName System.IO.Compression
-            $gzipStream = New-Object System.IO.FileStream($OTEL_PATH, [System.IO.FileMode]::Open)
-            $gzStream = New-Object System.IO.Compression.GZipStream($gzipStream, [System.IO.Compression.CompressionMode]::Decompress)
-            $tarStream = New-Object System.IO.FileStream($tarPath, [System.IO.FileMode]::Create)
-            
-            $gzStream.CopyTo($tarStream)
-            
-            $tarStream.Close()
-            $gzStream.Close()
-            $gzipStream.Close()
-            
-            Write-Host "    ✓ Decompressed to .tar" -ForegroundColor Green
-        } catch {
-            throw "Failed to decompress .gz file: $($_.Exception.Message)"
-        }
-        
-        # Step 2: Extract .tar - simplified approach focusing on the main executable
-        Write-Host "    → Extracting .tar archive..." -ForegroundColor Gray
-        
-        try {
-            $tarBytes = [System.IO.File]::ReadAllBytes($tarPath)
-            $position = 0
-            $extractedFiles = 0
-            $maxIterations = 100  # Safety limit
-            $iterations = 0
-            
-            while ($position -lt $tarBytes.Length - 512 -and $iterations -lt $maxIterations) {
-                $iterations++
-                
-                # Read tar header (512 bytes)
-                if ($position + 512 -gt $tarBytes.Length) {
-                    break
-                }
-                $header = $tarBytes[$position..($position + 511)]
-                
-                # Get filename (first 100 bytes, null-terminated)
-                $nameBytes = $header[0..99]
-                $nameEndIndex = [Array]::IndexOf($nameBytes, 0)
-                if ($nameEndIndex -lt 0) { $nameEndIndex = 100 }
-                
-                $fileName = ""
-                try {
-                    $fileName = [System.Text.Encoding]::ASCII.GetString($nameBytes, 0, $nameEndIndex).Trim()
-                } catch {
-                    # Skip this entry if filename can't be decoded
-                    $position += 512
-                    continue
-                }
-                
-                # Skip if empty header (end of archive)
-                if ([string]::IsNullOrEmpty($fileName) -or $fileName -eq [char]0) {
-                    break
-                }
-                
-                # Get file size (bytes 124-135, octal)
-                $sizeBytes = $header[124..135]
-                $sizeStr = [System.Text.Encoding]::ASCII.GetString($sizeBytes).Trim([char]0, ' ')
-                
-                $fileSize = 0
-                try {
-                    if (-not [string]::IsNullOrWhiteSpace($sizeStr)) {
-                        # Remove any non-octal characters
-                        $sizeStr = $sizeStr -replace '[^0-7]', ''
-                        if (-not [string]::IsNullOrEmpty($sizeStr)) {
-                            $fileSize = [Convert]::ToInt64($sizeStr, 8)
-                        }
-                    }
-                } catch {
-                    # If size parsing fails, skip this entry
-                    $position += 512
-                    continue
-                }
-                
-                # Move to data section
-                $position += 512
-                
-                # Extract file data if it's a regular file and size > 0
-                if ($fileSize -gt 0 -and -not $fileName.EndsWith('/')) {
-                    # Clean filename - remove any path traversal and invalid chars
-                    $fileName = $fileName -replace '\.\.[\\/]', ''  # Remove ../ or ..\
-                    $fileName = $fileName -replace '^[\\/]+', ''    # Remove leading slashes
-                    
-                    # Windows invalid filename characters
-                    $invalidChars = [System.IO.Path]::GetInvalidFileNameChars() + [System.IO.Path]::GetInvalidPathChars()
-                    $cleanFileName = $fileName
-                    foreach ($char in $invalidChars) {
-                        $cleanFileName = $cleanFileName.Replace($char, '_')
-                    }
-                    
-                    # Only extract .exe files to avoid issues
-                    if ($cleanFileName.EndsWith('.exe') -or $cleanFileName -eq 'otelcol-contrib.exe') {
-                        try {
-                            $outputPath = Join-Path $INSTALL_DIR $cleanFileName
-                            
-                            # Ensure we don't go outside the install directory
-                            $fullOutputPath = [System.IO.Path]::GetFullPath($outputPath)
-                            $fullInstallDir = [System.IO.Path]::GetFullPath($INSTALL_DIR)
-                            
-                            if ($fullOutputPath.StartsWith($fullInstallDir)) {
-                                # Create directory if needed
-                                $outputDir = Split-Path $outputPath -Parent
-                                if (-not (Test-Path $outputDir)) {
-                                    New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
-                                }
-                                
-                                # Write file data
-                                if ($position + $fileSize -le $tarBytes.Length) {
-                                    $fileData = $tarBytes[$position..($position + $fileSize - 1)]
-                                    [System.IO.File]::WriteAllBytes($outputPath, $fileData)
-                                    $extractedFiles++
-                                    Write-Host "      → Extracted: $cleanFileName" -ForegroundColor Gray
-                                }
-                            }
-                        } catch {
-                            Write-Host "      ⚠ Could not extract $cleanFileName : $($_.Exception.Message)" -ForegroundColor Yellow
-                        }
-                    }
-                }
-                
-                # Move to next entry (file data is padded to 512 byte boundary)
-                if ($fileSize -gt 0) {
-                    $position += [Math]::Ceiling($fileSize / 512) * 512
-                } else {
-                    $position += 512
-                }
-            }
-            
-            # Clean up temporary tar file
-            Remove-Item $tarPath -Force -ErrorAction SilentlyContinue
-            
-            if ($extractedFiles -gt 0) {
-                Write-Host "    ✓ Extracted $extractedFiles file(s)" -ForegroundColor Green
-                Write-Host "✓ Extraction complete with PowerShell!" -ForegroundColor Green
-            } else {
-                throw "No files were extracted from the tar archive"
-            }
-        } catch {
-            throw "Failed to extract tar archive: $($_.Exception.Message)"
-        }
-        
-    } catch {
-        Write-Host "✗ Error during PowerShell extraction: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "" -ForegroundColor Red
-        Write-Host "=== MANUAL EXTRACTION REQUIRED ===" -ForegroundColor Yellow
-        Write-Host "" -ForegroundColor Yellow
-        Write-Host "The automated extraction failed. Please extract manually:" -ForegroundColor Yellow
-        Write-Host "" -ForegroundColor White
-        Write-Host "Option 1 - Using 7-Zip (Recommended):" -ForegroundColor Cyan
-        Write-Host "  1. Download 7-Zip from: https://www.7-zip.org/" -ForegroundColor White
-        Write-Host "  2. Install 7-Zip" -ForegroundColor White
-        Write-Host "  3. Run these commands:" -ForegroundColor White
-        Write-Host "     cd `"$env:TEMP`"" -ForegroundColor Gray
-        Write-Host "     & 'C:\Program Files\7-Zip\7z.exe' x otelcol.tar.gz" -ForegroundColor Gray
-        Write-Host "     & 'C:\Program Files\7-Zip\7z.exe' x otelcol.tar -o`"$INSTALL_DIR`"" -ForegroundColor Gray
-        Write-Host "" -ForegroundColor White
-        Write-Host "Option 2 - Manual download and extraction:" -ForegroundColor Cyan
-        Write-Host "  1. Download: $OTEL_URL" -ForegroundColor White
-        Write-Host "  2. Extract with 7-Zip or WinRAR (extract twice: .gz then .tar)" -ForegroundColor White
-        Write-Host "  3. Copy otelcol-contrib.exe to: $INSTALL_DIR" -ForegroundColor White
-        Write-Host "  4. Run this script again" -ForegroundColor White
-        Write-Host "" -ForegroundColor White
-        Write-Host "Option 3 - Direct binary download:" -ForegroundColor Cyan
-        Write-Host "  1. Go to: https://github.com/open-telemetry/opentelemetry-collector-releases/releases" -ForegroundColor White
-        Write-Host "  2. Find version v$OTEL_VERSION" -ForegroundColor White
-        Write-Host "  3. Download the .tar.gz file for windows_amd64" -ForegroundColor White
-        Write-Host "  4. Extract and copy otelcol-contrib.exe to: $INSTALL_DIR" -ForegroundColor White
-        Write-Host "" -ForegroundColor White
-        Exit-WithPause 1
+    Write-Host "  tar command not found; using official MSI extraction for this legacy Windows host." -ForegroundColor Yellow
+}
+
+if (-not $collectorExtracted) {
+    if ($hasTar) {
+        Write-Host "  Falling back to official MSI extraction..." -ForegroundColor Cyan
     }
+
+    $collectorExtracted = Install-OtelCollectorFromMsi `
+        -MsiUrl $OTEL_MSI_URL `
+        -MsiPath $OTEL_MSI_PATH `
+        -InstallDir $INSTALL_DIR `
+        -ExePath $EXE_PATH
+}
+
+if (-not $collectorExtracted) {
+    Write-Host "" -ForegroundColor Red
+    Write-Host "=== MANUAL EXTRACTION REQUIRED ===" -ForegroundColor Yellow
+    Write-Host "" -ForegroundColor Yellow
+    Write-Host "The automated extraction failed. Please extract manually:" -ForegroundColor Yellow
+    Write-Host "" -ForegroundColor White
+    Write-Host "Option 1 - MSI administrative extraction:" -ForegroundColor Cyan
+    Write-Host "  1. Download: $OTEL_MSI_URL" -ForegroundColor White
+    Write-Host "  2. Run: msiexec /a otelcol-contrib_${OTEL_VERSION}_windows_x64.msi /qn TARGETDIR=`"$env:TEMP\otelcol-msi-extract`"" -ForegroundColor White
+    Write-Host "  3. Copy otelcol-contrib.exe to: $INSTALL_DIR" -ForegroundColor White
+    Write-Host "  4. Run this script again" -ForegroundColor White
+    Write-Host "" -ForegroundColor White
+    Write-Host "Option 2 - 7-Zip archive extraction:" -ForegroundColor Cyan
+    Write-Host "  1. Download: $OTEL_ARCHIVE_URL" -ForegroundColor White
+    Write-Host "  2. Extract with 7-Zip or WinRAR (extract twice: .gz then .tar)" -ForegroundColor White
+    Write-Host "  3. Copy otelcol-contrib.exe to: $INSTALL_DIR" -ForegroundColor White
+    Write-Host "  4. Run this script again" -ForegroundColor White
+    Write-Host "" -ForegroundColor White
+    Exit-WithPause 1
 }
 
 # Wait for file system to catch up
@@ -1568,6 +1413,7 @@ try {
 
 # Clean up temporary files
 Remove-Item $OTEL_PATH -Force -ErrorAction SilentlyContinue
+Remove-Item $OTEL_MSI_PATH -Force -ErrorAction SilentlyContinue
 
 # Final summary
 Write-Host ""
