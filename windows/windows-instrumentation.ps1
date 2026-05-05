@@ -7,13 +7,29 @@
 # Don't exit PowerShell on errors, just continue
 $ErrorActionPreference = "Continue"
 
-# Helper function to pause before exit
+# Helper functions to stop the installer without closing an interactive PowerShell window.
+function Wait-BeforeReturn {
+    Write-Host ""
+    if (-not (Test-EnvFlag @("ELVEN_AUTO_CONFIRM", "AUTO_CONFIRM"))) {
+        Write-Host "Press any key to return to PowerShell..." -ForegroundColor Cyan
+        try {
+            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        } catch {
+            try {
+                $null = Read-Host "Press Enter to return to PowerShell"
+            } catch {
+                Start-Sleep -Seconds 10
+            }
+        }
+    }
+}
+
 function Exit-WithPause {
     param([int]$ExitCode = 0)
-    Write-Host ""
-    Write-Host "Press any key to exit..." -ForegroundColor Cyan
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-    exit $ExitCode
+
+    Wait-BeforeReturn
+    $script:InstallerExitCode = $ExitCode
+    throw "__ELVEN_WINDOWS_INSTALLER_EXIT__:$ExitCode"
 }
 
 function ConvertTo-YamlQuotedString {
@@ -120,12 +136,13 @@ $EXPORTER_SERVICE_NAME = "windows_exporter"
 $EXE_PATH = "$INSTALL_DIR\otelcol-contrib.exe"
 $CONFIG_URI = ConvertTo-OtelFileConfigUri $CONFIG_FILE
 
-# ============================================================================
-# CLEANUP - Remove all previous installations to avoid conflicts
-# ============================================================================
-Write-Host "=== Pre-Installation Cleanup ===" -ForegroundColor Yellow
-Write-Host "Removing any previous installations to ensure clean setup..." -ForegroundColor Yellow
-Write-Host ""
+function Invoke-PreInstallationCleanup {
+    # ============================================================================
+    # CLEANUP - Remove all previous installations to avoid conflicts
+    # ============================================================================
+    Write-Host "=== Pre-Installation Cleanup ===" -ForegroundColor Yellow
+    Write-Host "Removing any previous installations to ensure clean setup..." -ForegroundColor Yellow
+    Write-Host ""
 
 # 1. Stop and delete services
 Write-Host "[1/6] Stopping and removing services..." -ForegroundColor Cyan
@@ -241,10 +258,11 @@ Write-Host "[6/6] Waiting for Windows to release all resources..." -ForegroundCo
 Start-Sleep -Seconds 5
 Write-Host "  ✓ System ready for clean installation!" -ForegroundColor Green
 
-Write-Host ""
-Write-Host "=== Cleanup Complete - Starting Fresh Installation ===" -ForegroundColor Green
-Write-Host ""
-Write-Host ""
+    Write-Host ""
+    Write-Host "=== Cleanup Complete - Starting Fresh Installation ===" -ForegroundColor Green
+    Write-Host ""
+    Write-Host ""
+}
 
 # ============================================================================
 
@@ -513,11 +531,12 @@ function Download-WithRetry {
     return $false
 }
 
-# Run pre-flight checks
-if (-not (Test-Prerequisites)) {
-    Write-Host "Exiting due to failed pre-flight checks." -ForegroundColor Red
-    Exit-WithPause 1
-}
+try {
+    # Run pre-flight checks
+    if (-not (Test-Prerequisites)) {
+        Write-Host "Exiting due to failed pre-flight checks." -ForegroundColor Red
+        Exit-WithPause 1
+    }
 
 # Collect user information with validation
 Write-Host "Configuration:" -ForegroundColor Yellow
@@ -708,6 +727,8 @@ if ($confirm -ne "y" -and $confirm -ne "Y" -and $confirm -ne "yes") {
     Exit-WithPause 0
 }
 
+Write-Host ""
+Invoke-PreInstallationCleanup
 Write-Host ""
 
 # ====================
@@ -1650,3 +1671,22 @@ Write-Host "    Remove-Item 'C:\Program Files\OpenTelemetry Collector' -Recurse 
 Write-Host "    Remove-Item 'C:\Program Files\Windows Exporter' -Recurse -Force" -ForegroundColor Gray
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
+
+} catch {
+    $errorMessage = $_.Exception.Message
+    if ($errorMessage -match '^__ELVEN_WINDOWS_INSTALLER_EXIT__:(\d+)$') {
+        $global:LASTEXITCODE = [int]$matches[1]
+        return
+    }
+
+    Write-Host ""
+    Write-Host "✗ Unexpected installer error: $errorMessage" -ForegroundColor Red
+    if ($_.ScriptStackTrace) {
+        Write-Host $_.ScriptStackTrace -ForegroundColor Red
+    }
+    Write-Host ""
+    Write-Host "The PowerShell window was intentionally kept open so the error can be copied." -ForegroundColor Yellow
+    $global:LASTEXITCODE = 1
+    Wait-BeforeReturn
+    return
+}
