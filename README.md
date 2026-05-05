@@ -21,7 +21,7 @@ The instrumentation scripts automatically install, configure, and start monitori
 Open **PowerShell as Administrator**:
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/windows-instrumentation.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/windows-instrumentation.ps1 | iex
 ```
 
 📖 [Full Windows Documentation](./windows/)
@@ -31,7 +31,7 @@ iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/win
 Open **PowerShell as Administrator**:
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 | iex
 ```
 
 📖 [elven-logs-collector Documentation](./windows/elven-logs-collector/)
@@ -211,12 +211,12 @@ Simply re-run the installation script. It will:
 
 ### Windows
 ```powershell
-iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/windows-instrumentation.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/windows-instrumentation.ps1 | iex
 ```
 
 ### Windows (elven-logs-collector)
 ```powershell
-iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 | iex
 ```
 
 ### Linux
@@ -353,7 +353,7 @@ We welcome contributions! Please:
 
 | Task | Windows | Linux |
 |------|---------|-------|
-| **Install** | `iwr -useb <url> \| iex` | `curl -sSL <url> \| sudo bash` |
+| **Install** | `[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr -useb <url> \| iex` | `curl -sSL <url> \| sudo bash` |
 | **Check Status** | `Get-Service otelcol` | `systemctl status otelcol` |
 | **Restart** | `Restart-Service otelcol` | `sudo systemctl restart otelcol` |
 | **Logs** | `Get-WinEvent` | `journalctl -u otelcol -f` |
@@ -363,7 +363,7 @@ We welcome contributions! Please:
 
 | Task | Command |
 |------|---------|
-| **Install** | `iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 \| iex` |
+| **Install** | `[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 \| iex` |
 | **Check Status** | `Get-Service Alloy` |
 | **Restart** | `Restart-Service Alloy` |
 | **Validate Config** | `& "$env:ProgramFiles\GrafanaLabs\Alloy\alloy.exe" validate --stability.level=generally-available "$env:ProgramFiles\GrafanaLabs\Alloy\config.alloy"` |

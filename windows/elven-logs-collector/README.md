@@ -7,7 +7,7 @@ Automated installer for elven-logs-collector on Windows servers, collecting Wind
 Open PowerShell as Administrator and run:
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 | iex
 ```
 
 ## Automated Installation
@@ -19,8 +19,10 @@ $env:ELVEN_INSTANCE_NAME = $env:COMPUTERNAME.ToLower()
 $env:ELVEN_ENVIRONMENT = "production"
 $env:ELVEN_AUTO_CONFIRM = "true"
 
-iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 | iex
 ```
+
+If PowerShell returns `Could not create SSL/TLS secure channel`, the current session is not using TLS 1.2 for GitHub. Run the command above exactly as shown, including the `[Net.ServicePointManager]::SecurityProtocol` prefix.
 
 To collect additional Event Log channels or files:
 

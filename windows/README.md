@@ -14,13 +14,14 @@ Automated installers for Windows observability on Windows servers.
 Open PowerShell as **Administrator** and run:
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/windows-instrumentation.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/windows-instrumentation.ps1 | iex
 ```
 
 ### Option 2: Download and run (recommended for production)
 
 ```powershell
 # Download
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Invoke-WebRequest -Uri https://raw.githubusercontent.com/elven-observability/scripts/main/windows/windows-instrumentation.ps1 -OutFile install.ps1
 
 # Run
@@ -32,7 +33,7 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/elven-observability/scr
 Open PowerShell as **Administrator** and run:
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 | iex
 ```
 
 For automated installs:
@@ -44,8 +45,10 @@ $env:ELVEN_INSTANCE_NAME = $env:COMPUTERNAME.ToLower()
 $env:ELVEN_ENVIRONMENT = "production"
 $env:ELVEN_AUTO_CONFIRM = "true"
 
-iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/elven-logs-collector/windows-logs-instrumentation.ps1 | iex
 ```
+
+If PowerShell returns `Could not create SSL/TLS secure channel`, the current session is not using TLS 1.2 for GitHub. Run the commands above exactly as shown, including the `[Net.ServicePointManager]::SecurityProtocol` prefix.
 
 Full logs documentation: [elven-logs-collector](./elven-logs-collector/)
 
