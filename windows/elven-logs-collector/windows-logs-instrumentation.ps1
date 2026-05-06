@@ -7,20 +7,28 @@
 $ErrorActionPreference = "Stop"
 $script:AutoConfirm = $false
 
-function Exit-WithPause {
-    param([int]$ExitCode = 0)
-
+function Wait-BeforeReturn {
     Write-Host ""
     if (-not $script:AutoConfirm) {
-        Write-Host "Press any key to exit..." -ForegroundColor Cyan
+        Write-Host "Press any key to return to PowerShell..." -ForegroundColor Cyan
         try {
             $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
         } catch {
-            Start-Sleep -Seconds 2
+            try {
+                $null = Read-Host "Press Enter to return to PowerShell"
+            } catch {
+                Start-Sleep -Seconds 10
+            }
         }
     }
+}
 
-    exit $ExitCode
+function Exit-WithPause {
+    param([int]$ExitCode = 0)
+
+    Wait-BeforeReturn
+    $script:InstallerExitCode = $ExitCode
+    throw "__ELVEN_LOGS_INSTALLER_EXIT__:$ExitCode"
 }
 
 function Write-Step {
@@ -943,7 +951,17 @@ try {
 
     Exit-WithPause 0
 } catch {
-    Write-Fail "Unexpected error: $($_.Exception.Message)"
-    Write-Host $_.ScriptStackTrace -ForegroundColor Red
-    Exit-WithPause 1
+    $errorMessage = $_.Exception.Message
+    if ($errorMessage -match '^__ELVEN_LOGS_INSTALLER_EXIT__:(\d+)$') {
+        $global:LASTEXITCODE = [int]$matches[1]
+        return
+    }
+
+    Write-Fail "Unexpected error: $errorMessage"
+    if ($_.ScriptStackTrace) {
+        Write-Host $_.ScriptStackTrace -ForegroundColor Red
+    }
+    $global:LASTEXITCODE = 1
+    Wait-BeforeReturn
+    return
 }
