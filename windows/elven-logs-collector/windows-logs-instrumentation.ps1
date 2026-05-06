@@ -788,6 +788,19 @@ try {
         Write-Success "Existing config backed up: $backupPath"
     }
 
+    $configContent = Build-AlloyConfig `
+        -Channels $LOG_CHANNELS `
+        -FilePaths $LOG_PATHS `
+        -BookmarkDir $ALLOY_BOOKMARK_DIR `
+        -MaxAgeMinutes $EVENTLOG_MAX_AGE_MINUTES `
+        -InstanceName $INSTANCE_NAME `
+        -Environment $ENVIRONMENT `
+        -CustomerName $CUSTOMER_NAME `
+        -LokiUrl $LOKI_URL
+
+    [System.IO.File]::WriteAllText($CONFIG_FILE, $configContent, [System.Text.Encoding]::UTF8)
+    Write-Success "Initial config written: $CONFIG_FILE"
+
     Write-Step "Downloading elven-logs-collector runtime"
     Write-Host "  Installer: $INSTALLER_URL" -ForegroundColor Gray
     if (-not (Download-WithRetry -Url $INSTALLER_URL -OutputPath $INSTALLER_PATH -MaxRetries 3)) {
@@ -806,19 +819,35 @@ try {
     }
 
     Write-Step "Installing elven-logs-collector runtime"
-    $installerArgs = @(
+    $installerArgumentList = @(
         "/S",
-        "/CONFIG=$CONFIG_FILE",
+        "/CONFIG=`"$CONFIG_FILE`"",
         "/DISABLEREPORTING=yes",
         "/DISABLEPROFILING=yes",
         "/STABILITY=generally-available",
         "/FORCEREGISTRY=yes"
-    )
+    ) -join " "
 
-    & $INSTALLER_PATH @installerArgs
-    $installerExitCode = $LASTEXITCODE
-    if ($installerExitCode -ne 0 -and $installerExitCode -ne 3010) {
+    Write-Host "  Running installer in silent mode..." -ForegroundColor Gray
+    $installerProcess = Start-Process -FilePath $INSTALLER_PATH -ArgumentList $installerArgumentList -Wait -PassThru -ErrorAction Stop
+    $installerExitCode = $installerProcess.ExitCode
+
+    if ($null -eq $installerExitCode) {
+        Write-Warn "Collector runtime installer did not report an exit code; checking installed files."
+        Start-Sleep -Seconds 3
+        $serviceAfterInstaller = Get-Service -Name $SERVICE_NAME -ErrorAction SilentlyContinue
+        if ((Test-Path $ALLOY_EXE) -and $serviceAfterInstaller) {
+            Write-Success "Collector runtime appears installed despite missing installer exit code"
+        } else {
+            Write-Fail "Collector runtime installer did not report an exit code and installed files were not found."
+            Write-Host "  Installer path: $INSTALLER_PATH" -ForegroundColor Yellow
+            Write-Host "  Arguments: $installerArgumentList" -ForegroundColor Yellow
+            Exit-WithPause 1
+        }
+    } elseif ($installerExitCode -ne 0 -and $installerExitCode -ne 3010) {
         Write-Fail "Collector runtime installer failed with exit code $installerExitCode."
+        Write-Host "  Installer path: $INSTALLER_PATH" -ForegroundColor Yellow
+        Write-Host "  Arguments: $installerArgumentList" -ForegroundColor Yellow
         Exit-WithPause 1
     }
     Write-Success "Collector runtime installer completed"
@@ -832,16 +861,6 @@ try {
     }
 
     Write-Step "Writing collector configuration"
-    $configContent = Build-AlloyConfig `
-        -Channels $LOG_CHANNELS `
-        -FilePaths $LOG_PATHS `
-        -BookmarkDir $ALLOY_BOOKMARK_DIR `
-        -MaxAgeMinutes $EVENTLOG_MAX_AGE_MINUTES `
-        -InstanceName $INSTANCE_NAME `
-        -Environment $ENVIRONMENT `
-        -CustomerName $CUSTOMER_NAME `
-        -LokiUrl $LOKI_URL
-
     [System.IO.File]::WriteAllText($CONFIG_FILE, $configContent, [System.Text.Encoding]::UTF8)
     Write-Success "Config written: $CONFIG_FILE"
 
