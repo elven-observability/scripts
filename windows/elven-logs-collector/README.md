@@ -34,7 +34,7 @@ $env:ELVEN_LOG_PATHS = "C:\inetpub\logs\LogFiles\*\*.log,C:\app\logs\*.log"
 ## Defaults
 
 - Collector runtime version: `1.16.0`
-- Loki endpoint: `https://logs.elvenobservability.com/loki/api/v1/push`
+- Loki endpoint: `https://loki.elvenobservability.com/loki/api/v1/push`
 - Event Log channels: `Application`
 - Event Log backfill safety window: `60` minutes
 - File logs: disabled unless paths are provided

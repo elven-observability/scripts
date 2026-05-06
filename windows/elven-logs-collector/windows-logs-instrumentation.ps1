@@ -519,7 +519,7 @@ try {
     }
 
     $SERVICE_NAME = "Alloy"
-    $LOKI_DEFAULT_URL = "https://logs.elvenobservability.com/loki/api/v1/push"
+    $LOKI_DEFAULT_URL = "https://loki.elvenobservability.com/loki/api/v1/push"
     $ALLOY_INSTALL_DIR = Join-Path $env:ProgramFiles "GrafanaLabs\Alloy"
     $ALLOY_DATA_DIR = Join-Path $env:ProgramData "GrafanaLabs\Alloy\data"
     $ALLOY_BOOKMARK_DIR = Join-Path $env:ProgramData "GrafanaLabs\Alloy\bookmarks"
