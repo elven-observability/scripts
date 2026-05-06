@@ -191,6 +191,49 @@ function Test-Administrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Resolve-AlloyExecutable {
+    param([string]$InstallDir)
+
+    $preferredNames = @(
+        "alloy.exe",
+        "alloy-windows-amd64.exe"
+    )
+
+    foreach ($name in $preferredNames) {
+        $candidate = Join-Path $InstallDir $name
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+
+    $candidateExe = Get-ChildItem -Path $InstallDir -Filter "alloy*.exe" -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notmatch '(?i)(service|install|uninstall)' } |
+        Sort-Object Name |
+        Select-Object -First 1
+
+    if ($candidateExe) {
+        return $candidateExe.FullName
+    }
+
+    return ""
+}
+
+function Show-AlloyInstallDirectory {
+    param([string]$InstallDir)
+
+    if (-not (Test-Path $InstallDir)) {
+        Write-Host "  Install directory does not exist: $InstallDir" -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "  Files found in ${InstallDir}:" -ForegroundColor Yellow
+    Get-ChildItem -Path $InstallDir -ErrorAction SilentlyContinue |
+        Select-Object -First 30 |
+        ForEach-Object {
+            Write-Host "    $($_.Name)" -ForegroundColor Yellow
+        }
+}
+
 function Download-WithRetry {
     param(
         [string]$Url,
@@ -836,12 +879,18 @@ try {
         Write-Warn "Collector runtime installer did not report an exit code; checking installed files."
         Start-Sleep -Seconds 3
         $serviceAfterInstaller = Get-Service -Name $SERVICE_NAME -ErrorAction SilentlyContinue
+        $resolvedAlloyExe = Resolve-AlloyExecutable -InstallDir $ALLOY_INSTALL_DIR
+        if (-not [string]::IsNullOrWhiteSpace($resolvedAlloyExe)) {
+            $ALLOY_EXE = $resolvedAlloyExe
+        }
+
         if ((Test-Path $ALLOY_EXE) -and $serviceAfterInstaller) {
             Write-Success "Collector runtime appears installed despite missing installer exit code"
         } else {
             Write-Fail "Collector runtime installer did not report an exit code and installed files were not found."
             Write-Host "  Installer path: $INSTALLER_PATH" -ForegroundColor Yellow
             Write-Host "  Arguments: $installerArgumentList" -ForegroundColor Yellow
+            Show-AlloyInstallDirectory -InstallDir $ALLOY_INSTALL_DIR
             Exit-WithPause 1
         }
     } elseif ($installerExitCode -ne 0 -and $installerExitCode -ne 3010) {
@@ -853,6 +902,12 @@ try {
     Write-Success "Collector runtime installer completed"
 
     Start-Sleep -Seconds 3
+    $resolvedAlloyExe = Resolve-AlloyExecutable -InstallDir $ALLOY_INSTALL_DIR
+    if (-not [string]::IsNullOrWhiteSpace($resolvedAlloyExe)) {
+        $ALLOY_EXE = $resolvedAlloyExe
+        Write-Success "Alloy executable found: $ALLOY_EXE"
+    }
+
     $existingService = Get-Service -Name $SERVICE_NAME -ErrorAction SilentlyContinue
     if ($existingService -and $existingService.Status -eq "Running") {
         Write-Host "  Stopping service before applying Elven config..." -ForegroundColor Gray
@@ -898,6 +953,7 @@ try {
     Write-Step "Validating collector configuration"
     if (-not (Test-Path $ALLOY_EXE)) {
         Write-Fail "Alloy executable not found: $ALLOY_EXE"
+        Show-AlloyInstallDirectory -InstallDir $ALLOY_INSTALL_DIR
         Exit-WithPause 1
     }
 

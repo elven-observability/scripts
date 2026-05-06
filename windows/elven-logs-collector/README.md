@@ -71,7 +71,12 @@ Get-Service Alloy
 Validate the collector config:
 
 ```powershell
-& "$env:ProgramFiles\GrafanaLabs\Alloy\alloy.exe" validate --stability.level=generally-available "$env:ProgramFiles\GrafanaLabs\Alloy\config.alloy"
+$alloyExe = @(
+  "$env:ProgramFiles\GrafanaLabs\Alloy\alloy.exe",
+  "$env:ProgramFiles\GrafanaLabs\Alloy\alloy-windows-amd64.exe"
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+& $alloyExe validate --stability.level=generally-available "$env:ProgramFiles\GrafanaLabs\Alloy\config.alloy"
 ```
 
 Generate a test event:
