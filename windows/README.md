@@ -28,6 +28,27 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/elven-observability/scr
 .\install.ps1
 ```
 
+### Metrics to another OpenTelemetry Collector (OTLP/HTTP)
+
+Open PowerShell as **Administrator**:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/windows-collector-instrumentation.ps1 | iex
+```
+
+Automated installation:
+
+```powershell
+$env:ELVEN_OTLP_ENDPOINT = "https://collector.example.com:4318"
+$env:ELVEN_OTLP_TENANT_ID = "your-tenant-id"       # Optional
+$env:ELVEN_OTLP_API_TOKEN = "your-token"            # Optional
+$env:ELVEN_INSTANCE_NAME = $env:COMPUTERNAME.ToLower()
+$env:ELVEN_ENVIRONMENT = "production"
+$env:ELVEN_AUTO_CONFIRM = "true"
+
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/windows-collector-instrumentation.ps1 | iex
+```
+
 ### Logs with elven-logs-collector
 
 Open PowerShell as **Administrator** and run:
@@ -61,8 +82,8 @@ Full logs documentation: [elven-logs-collector](./elven-logs-collector/)
 
 ## 🔧 What do the scripts install?
 
-1. **Windows Exporter (v0.27.3)** - Collects Windows system metrics
-2. **OpenTelemetry Collector (v0.114.0)** - Scrapes and forwards metrics to Mimir
+1. **Windows Exporter (v0.31.7)** - Collects Windows system metrics
+2. **OpenTelemetry Collector Contrib (v0.156.0)** - Scrapes metrics and exports to Mimir or another Collector
 3. **elven-logs-collector runtime (v1.16.0)** - Collects Windows Event Logs and optional file logs, then forwards them to Loki
 
 ## 📊 Metrics collected
@@ -94,13 +115,24 @@ windows_net_bytes_received_total
 
 ## 📝 Configuration
 
-During installation, you'll be prompted for:
+The direct entrypoint requires a Mimir tenant and API token. The dedicated Collector entrypoint asks for:
 
-- **Tenant ID** - Your Elven Observability tenant identifier
-- **API Token** - Authentication token for Mimir
+- **OTLP/HTTP endpoint** - Base URL such as `https://collector.example.com:4318`, or a full `/v1/metrics` URL
+- **Tenant ID** - Optional `X-Scope-OrgID` header
+- **API Token** - Optional Bearer token
 - **Instance Name** - Server identifier (default: hostname)
 - **Customer Name** - Optional customer/company name
 - **Environment** - production/staging/dev (default: production)
+
+Optional Collector variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `ELVEN_OTLP_HEADERS` | Extra headers in `name=value,name2=value2` format. Values may contain `=`, but not commas. |
+| `ELVEN_OTLP_TLS_CA_FILE` | Custom CA certificate path. |
+| `ELVEN_OTLP_TLS_CERT_FILE` | mTLS client certificate path. Must be used with the key. |
+| `ELVEN_OTLP_TLS_KEY_FILE` | mTLS client key path. Must be used with the certificate. |
+| `ELVEN_OTLP_TLS_INSECURE_SKIP_VERIFY` | Disables certificate verification when `true`. Emergency use only. |
 
 ## 🛠️ Useful commands
 
@@ -135,15 +167,18 @@ Get-WinEvent -LogName Application -MaxEvents 20 | Where-Object {$_.Message -like
 - **Windows Exporter**: `C:\Program Files\Windows Exporter\`
 - **OpenTelemetry Collector**: `C:\Program Files\OpenTelemetry Collector\`
 - **Configuration**: `C:\Program Files\OpenTelemetry Collector\config.yaml`
+- **Persistent OTLP queue**: `C:\ProgramData\OpenTelemetry Collector\file_storage` (Collector mode only)
 
 ## 🔒 Security
 
 The scripts:
-- ✅ Validates downloads before execution
-- ✅ Uses TLS 1.2 for all connections
+- ✅ Verifies release artifacts with SHA-256 before extraction or execution
+- ✅ Uses TLS 1.2 for installer and release downloads
 - ✅ Installs only from official sources (GitHub releases)
 - ✅ Validates configuration before starting services
-- ⚠️ Metrics token is stored in the OpenTelemetry Collector config; elven-logs-collector stores the token in the Alloy service registry environment, not in `config.alloy`
+- ✅ Restricts the metrics config and persistent queue to SYSTEM and local Administrators
+- ✅ Does not print config contents that may contain credentials during failures
+- ⚠️ Credentials are stored in the restricted Collector config when authentication is configured
 
 ## 🏗️ Architecture
 
@@ -157,7 +192,7 @@ Windows Server
             ├─> Scrapes Windows Exporter
             ├─> Adds labels (instance, environment, customer)
             ├─> Batches metrics
-            └─> Forwards to Mimir (remote write)
+            └─> Mimir (remote write) or another Collector (OTLP/HTTP)
 ```
 
 ## 🐛 Troubleshooting
@@ -208,9 +243,11 @@ Get-Service windows_exporter, otelcol | Format-Table -AutoSize
 (Invoke-WebRequest http://localhost:9182/metrics).Content | Select-String "windows_cpu"
 ```
 
-3. Verify network connectivity to Mimir:
+3. Verify network connectivity to the configured destination:
 ```powershell
 Test-NetConnection mimir.elvenobservability.com -Port 443
+# Collector example:
+Test-NetConnection collector.example.com -Port 4318
 ```
 
 ## 🔄 Updating

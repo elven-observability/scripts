@@ -118,6 +118,131 @@ function Test-EnvFlag {
     return $value -match '^(1|true|yes|y)$'
 }
 
+function Get-EnvBoolean {
+    param([string[]]$Names)
+
+    $value = Get-EnvValue $Names
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $false
+    }
+    if ($value -match '^(1|true|yes|y)$') {
+        return $true
+    }
+    if ($value -match '^(0|false|no|n)$') {
+        return $false
+    }
+
+    throw "$($Names[0]) must be true or false."
+}
+
+function ConvertTo-MetricsDestination {
+    param([AllowNull()][string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return "mimir"
+    }
+
+    switch ($Value.Trim().ToLowerInvariant()) {
+        { $_ -in @("mimir", "prometheusremotewrite", "prometheus_remote_write") } { return "mimir" }
+        { $_ -in @("collector", "otlp", "otlphttp") } { return "collector" }
+        default { throw "Invalid metrics destination '$Value'. Supported values: mimir, collector." }
+    }
+}
+
+function Test-HttpEndpoint {
+    param([string]$Value)
+
+    $uri = $null
+    if (-not [Uri]::TryCreate($Value, [UriKind]::Absolute, [ref]$uri)) {
+        return $false
+    }
+
+    return $uri.Scheme -in @("http", "https") -and -not [string]::IsNullOrWhiteSpace($uri.Host)
+}
+
+function ConvertFrom-OtlpHeaderList {
+    param([AllowNull()][string]$Value)
+
+    $headers = @{}
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $headers
+    }
+
+    foreach ($entry in ($Value -split ',')) {
+        $separatorIndex = $entry.IndexOf('=')
+        if ($separatorIndex -le 0) {
+            throw "Invalid OTLP header entry. Expected name=value."
+        }
+
+        $name = $entry.Substring(0, $separatorIndex).Trim()
+        $headerValue = $entry.Substring($separatorIndex + 1).Trim()
+        if ($name -notmatch '^[A-Za-z0-9!#$%&''*+.^_`|~-]+$') {
+            throw "Invalid OTLP header name '$name'."
+        }
+        if ($headerValue -match "[`r`n]") {
+            throw "OTLP header values cannot contain line breaks."
+        }
+
+        $headers[$name] = $headerValue
+    }
+
+    return $headers
+}
+
+function Set-CollectorConfigAcl {
+    param([string]$Path)
+
+    $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+    if ($item.PSIsContainer) {
+        $aclOutput = & icacls.exe $Path /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' /T /C 2>&1
+    } else {
+        $aclOutput = & icacls.exe $Path /inheritance:r /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' 2>&1
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not restrict Collector path ACL: $aclOutput"
+    }
+}
+
+function Verify-Sha256FromManifest {
+    param(
+        [string]$FilePath,
+        [string]$AssetName,
+        [string]$ManifestUrl
+    )
+
+    $manifestPath = Join-Path $env:TEMP ("elven-checksums-" + [Guid]::NewGuid().ToString("N") + ".txt")
+    try {
+        if (-not (Download-WithRetry -Url $ManifestUrl -OutputPath $manifestPath)) {
+            throw "Could not download checksum manifest."
+        }
+
+        $assetPattern = '^(?<hash>[0-9a-fA-F]{64})\s+\*?' + [Regex]::Escape($AssetName) + '$'
+        $expectedHash = $null
+        foreach ($line in (Get-Content -Path $manifestPath -ErrorAction Stop)) {
+            if ($line -match $assetPattern) {
+                $expectedHash = $matches['hash'].ToLowerInvariant()
+                break
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($expectedHash)) {
+            throw "Checksum not found for $AssetName."
+        }
+
+        $actualHash = (Get-FileHash -Path $FilePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+        if ($actualHash -ne $expectedHash) {
+            throw "SHA-256 validation failed for $AssetName. Expected $expectedHash; got $actualHash."
+        }
+
+        Write-Host "  ✓ SHA-256 verified for $AssetName" -ForegroundColor Green
+        return $true
+    } catch {
+        Write-Host "  ✗ $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    } finally {
+        Remove-Item $manifestPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Write-Host "=== Windows Instrumentation Installer ===" -ForegroundColor Cyan
 Write-Host "Elven Observability - Monitoring Setup" -ForegroundColor Cyan
 Write-Host ""
@@ -126,11 +251,12 @@ Write-Host ""
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # Variables
-$OTEL_VERSION = "0.114.0"
-$WINDOWS_EXPORTER_VERSION = "0.27.3"
+$OTEL_VERSION = "0.156.0"
+$WINDOWS_EXPORTER_VERSION = "0.31.7"
 $INSTALL_DIR = "C:\Program Files\OpenTelemetry Collector"
 $EXPORTER_DIR = "C:\Program Files\Windows Exporter"
 $CONFIG_FILE = "$INSTALL_DIR\config.yaml"
+$OTEL_STORAGE_DIR = "$env:ProgramData\OpenTelemetry Collector\file_storage"
 $OTEL_SERVICE_NAME = "otelcol"
 $EXPORTER_SERVICE_NAME = "windows_exporter"
 $EXE_PATH = "$INSTALL_DIR\otelcol-contrib.exe"
@@ -316,7 +442,11 @@ function Test-Prerequisites {
     # 2. Check internet connectivity
     Write-Host "2. Checking internet connectivity..." -ForegroundColor Yellow
     try {
-        $null = Test-NetConnection -ComputerName "github.com" -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction Stop
+        $downloadHost = "github.com"
+        $githubReachable = Test-NetConnection -ComputerName $downloadHost -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction Stop
+        if (-not $githubReachable) {
+            throw "TCP connectivity to $downloadHost`:443 failed."
+        }
         Write-Host "   ✓ Internet connection OK" -ForegroundColor Green
     } catch {
         try {
@@ -333,8 +463,7 @@ function Test-Prerequisites {
     # 3. Check if ports are available
     Write-Host "3. Checking if required ports are free..." -ForegroundColor Yellow
     $portsToCheck = @(
-        @{Port=9182; Service="Windows Exporter"},
-        @{Port=4317; Service="OpenTelemetry Collector"}
+        @{Port=9182; Service="Windows Exporter"}
     )
     
     foreach ($portInfo in $portsToCheck) {
@@ -532,6 +661,8 @@ function Install-OtelCollectorFromMsi {
     param(
         [string]$MsiUrl,
         [string]$MsiPath,
+        [string]$MsiAssetName,
+        [string]$ChecksumUrl,
         [string]$InstallDir,
         [string]$ExePath
     )
@@ -541,6 +672,10 @@ function Install-OtelCollectorFromMsi {
     if (-not (Download-WithRetry -Url $MsiUrl -OutputPath $MsiPath)) {
         Write-Host "✗ Failed to download Collector MSI after multiple attempts." -ForegroundColor Red
         Write-Host "  URL tried: $MsiUrl" -ForegroundColor Yellow
+        return $false
+    }
+    if (-not (Verify-Sha256FromManifest -FilePath $MsiPath -AssetName $MsiAssetName -ManifestUrl $ChecksumUrl)) {
+        Remove-Item $MsiPath -Force -ErrorAction SilentlyContinue
         return $false
     }
 
@@ -594,44 +729,135 @@ try {
 Write-Host "Configuration:" -ForegroundColor Yellow
 Write-Host ""
 
-# Tenant ID
-$TENANT_ID = Get-EnvValue @("ELVEN_TENANT_ID", "TENANT_ID")
-if (-not [string]::IsNullOrWhiteSpace($TENANT_ID)) {
-    Write-Host "  ✓ Using Tenant ID from environment" -ForegroundColor Green
-} else {
-    do {
-        $TENANT_ID = Read-Host "Tenant ID"
-        if ([string]::IsNullOrWhiteSpace($TENANT_ID)) {
-            Write-Host "  ✗ Tenant ID cannot be empty!" -ForegroundColor Red
-        }
-    } while ([string]::IsNullOrWhiteSpace($TENANT_ID))
-}
-
-# API Token
-$apiTokenInput = Get-EnvValue @("ELVEN_API_TOKEN", "API_TOKEN")
-$apiTokenFromEnv = -not [string]::IsNullOrWhiteSpace($apiTokenInput)
-$API_TOKEN_PLAIN = Normalize-ApiToken $apiTokenInput
-if ($apiTokenFromEnv -and -not [string]::IsNullOrWhiteSpace($API_TOKEN_PLAIN)) {
-    Write-Host "  ✓ Using API Token from environment ($($API_TOKEN_PLAIN.Length) characters)" -ForegroundColor Green
-} else {
-    do {
-        $API_TOKEN = Read-Host "API Token" -AsSecureString
-        $API_TOKEN_PLAIN = Normalize-ApiToken (ConvertFrom-SecureStringToPlainText $API_TOKEN)
-        if ([string]::IsNullOrWhiteSpace($API_TOKEN_PLAIN)) {
-            Write-Host "  ✗ API Token cannot be empty!" -ForegroundColor Red
-        }
-    } while ([string]::IsNullOrWhiteSpace($API_TOKEN_PLAIN))
-}
-
-if ($API_TOKEN_PLAIN -match '\s') {
-    Write-Host "  ⚠ API Token contains whitespace after normalization; please verify the pasted value." -ForegroundColor Yellow
-} elseif (-not $apiTokenFromEnv) {
-    Write-Host "  ✓ API Token captured ($($API_TOKEN_PLAIN.Length) characters)" -ForegroundColor Green
-}
-
-$AUTO_CONFIRM = Test-EnvFlag @("ELVEN_AUTO_CONFIRM", "AUTO_CONFIRM")
+$AUTO_CONFIRM = Get-EnvBoolean @("ELVEN_AUTO_CONFIRM", "AUTO_CONFIRM")
 if ($AUTO_CONFIRM) {
     Write-Host "  ✓ Auto-confirm enabled from environment" -ForegroundColor Green
+}
+
+$METRICS_DESTINATION = ConvertTo-MetricsDestination (Get-EnvValue @("ELVEN_METRICS_DESTINATION", "METRICS_DESTINATION"))
+Write-Host "  ✓ Metrics destination: $METRICS_DESTINATION" -ForegroundColor Green
+
+$TENANT_ID = ""
+$API_TOKEN_PLAIN = ""
+$MIMIR_ENDPOINT = ""
+$OTLP_ENDPOINT = ""
+$OTLP_TENANT_ID = ""
+$OTLP_API_TOKEN = ""
+$OTLP_HEADERS_MAP = @{}
+$OTLP_TLS_CA_FILE = Get-EnvValue @("ELVEN_OTLP_TLS_CA_FILE", "OTLP_TLS_CA_FILE")
+$OTLP_TLS_CERT_FILE = Get-EnvValue @("ELVEN_OTLP_TLS_CERT_FILE", "OTLP_TLS_CERT_FILE")
+$OTLP_TLS_KEY_FILE = Get-EnvValue @("ELVEN_OTLP_TLS_KEY_FILE", "OTLP_TLS_KEY_FILE")
+$OTLP_TLS_INSECURE_SKIP_VERIFY = Get-EnvBoolean @("ELVEN_OTLP_TLS_INSECURE_SKIP_VERIFY", "OTLP_TLS_INSECURE_SKIP_VERIFY")
+
+if ($METRICS_DESTINATION -eq "mimir") {
+    $TENANT_ID = Get-EnvValue @("ELVEN_TENANT_ID", "TENANT_ID")
+    if (-not [string]::IsNullOrWhiteSpace($TENANT_ID)) {
+        Write-Host "  ✓ Using Tenant ID from environment" -ForegroundColor Green
+    } elseif ($AUTO_CONFIRM) {
+        throw "ELVEN_TENANT_ID is required for the Mimir destination."
+    } else {
+        do {
+            $TENANT_ID = Read-Host "Tenant ID"
+            if ([string]::IsNullOrWhiteSpace($TENANT_ID)) {
+                Write-Host "  ✗ Tenant ID cannot be empty!" -ForegroundColor Red
+            }
+        } while ([string]::IsNullOrWhiteSpace($TENANT_ID))
+    }
+
+    $apiTokenInput = Get-EnvValue @("ELVEN_API_TOKEN", "API_TOKEN")
+    $API_TOKEN_PLAIN = Normalize-ApiToken $apiTokenInput
+    if (-not [string]::IsNullOrWhiteSpace($API_TOKEN_PLAIN)) {
+        Write-Host "  ✓ Using API Token from environment ($($API_TOKEN_PLAIN.Length) characters)" -ForegroundColor Green
+    } elseif ($AUTO_CONFIRM) {
+        throw "ELVEN_API_TOKEN is required for the Mimir destination."
+    } else {
+        do {
+            $API_TOKEN = Read-Host "API Token" -AsSecureString
+            $API_TOKEN_PLAIN = Normalize-ApiToken (ConvertFrom-SecureStringToPlainText $API_TOKEN)
+            if ([string]::IsNullOrWhiteSpace($API_TOKEN_PLAIN)) {
+                Write-Host "  ✗ API Token cannot be empty!" -ForegroundColor Red
+            }
+        } while ([string]::IsNullOrWhiteSpace($API_TOKEN_PLAIN))
+    }
+
+    $MIMIR_ENDPOINT = Get-EnvValue @("ELVEN_MIMIR_ENDPOINT", "MIMIR_ENDPOINT")
+    if ([string]::IsNullOrWhiteSpace($MIMIR_ENDPOINT)) {
+        if (-not $AUTO_CONFIRM) {
+            $MIMIR_ENDPOINT = Read-Host "Mimir endpoint [default: https://mimir.elvenobservability.com/api/v1/push]"
+        }
+        if ([string]::IsNullOrWhiteSpace($MIMIR_ENDPOINT)) {
+            $MIMIR_ENDPOINT = "https://mimir.elvenobservability.com/api/v1/push"
+        }
+    }
+    if (-not (Test-HttpEndpoint $MIMIR_ENDPOINT)) {
+        throw "Mimir endpoint must be a valid http:// or https:// URL."
+    }
+    if ($MIMIR_ENDPOINT.StartsWith("http://", [StringComparison]::OrdinalIgnoreCase)) {
+        Write-Host "  ⚠ Mimir credentials will be sent over plaintext HTTP. HTTPS is strongly recommended." -ForegroundColor Yellow
+    }
+} else {
+    $OTLP_ENDPOINT = Get-EnvValue @("ELVEN_OTLP_ENDPOINT", "OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT")
+    if ([string]::IsNullOrWhiteSpace($OTLP_ENDPOINT) -and -not $AUTO_CONFIRM) {
+        $OTLP_ENDPOINT = Read-Host "OTLP/HTTP Collector endpoint (for example https://collector.example.com:4318)"
+    }
+    if ([string]::IsNullOrWhiteSpace($OTLP_ENDPOINT)) {
+        throw "ELVEN_OTLP_ENDPOINT is required for the collector destination."
+    }
+    if (-not (Test-HttpEndpoint $OTLP_ENDPOINT)) {
+        throw "OTLP endpoint must be a valid http:// or https:// URL."
+    }
+
+    $OTLP_TENANT_ID = Get-EnvValue @("ELVEN_OTLP_TENANT_ID", "OTLP_TENANT_ID")
+    if ([string]::IsNullOrWhiteSpace($OTLP_TENANT_ID) -and -not $AUTO_CONFIRM) {
+        $OTLP_TENANT_ID = Read-Host "Collector tenant ID / X-Scope-OrgID (optional)"
+    }
+
+    $otlpTokenInput = Get-EnvValue @("ELVEN_OTLP_API_TOKEN", "OTLP_API_TOKEN")
+    $OTLP_API_TOKEN = Normalize-ApiToken $otlpTokenInput
+    if ([string]::IsNullOrWhiteSpace($OTLP_API_TOKEN) -and -not $AUTO_CONFIRM) {
+        $addToken = Read-Host "Configure a Bearer token for the Collector? [y/N]"
+        if ($addToken -match '^[Yy]$') {
+            $secureToken = Read-Host "Collector API token" -AsSecureString
+            $OTLP_API_TOKEN = Normalize-ApiToken (ConvertFrom-SecureStringToPlainText $secureToken)
+            if ([string]::IsNullOrWhiteSpace($OTLP_API_TOKEN)) {
+                throw "Collector API token cannot be empty after selecting Bearer authentication."
+            }
+        }
+    }
+
+    $OTLP_HEADERS_MAP = ConvertFrom-OtlpHeaderList (Get-EnvValue @("ELVEN_OTLP_HEADERS", "OTLP_HEADERS"))
+    if ($OTLP_HEADERS_MAP.ContainsKey("Authorization") -and -not [string]::IsNullOrWhiteSpace($OTLP_API_TOKEN)) {
+        throw "Authorization is configured twice. Use ELVEN_OTLP_API_TOKEN or ELVEN_OTLP_HEADERS, not both."
+    }
+    if ($OTLP_HEADERS_MAP.ContainsKey("X-Scope-OrgID") -and -not [string]::IsNullOrWhiteSpace($OTLP_TENANT_ID)) {
+        throw "X-Scope-OrgID is configured twice. Use ELVEN_OTLP_TENANT_ID or ELVEN_OTLP_HEADERS, not both."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($OTLP_TENANT_ID)) {
+        $OTLP_HEADERS_MAP["X-Scope-OrgID"] = $OTLP_TENANT_ID
+    }
+    if (-not [string]::IsNullOrWhiteSpace($OTLP_API_TOKEN)) {
+        $OTLP_HEADERS_MAP["Authorization"] = "Bearer $OTLP_API_TOKEN"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($OTLP_TLS_CERT_FILE) -xor [string]::IsNullOrWhiteSpace($OTLP_TLS_KEY_FILE)) {
+        throw "ELVEN_OTLP_TLS_CERT_FILE and ELVEN_OTLP_TLS_KEY_FILE must be configured together."
+    }
+    foreach ($tlsFile in @($OTLP_TLS_CA_FILE, $OTLP_TLS_CERT_FILE, $OTLP_TLS_KEY_FILE)) {
+        if (-not [string]::IsNullOrWhiteSpace($tlsFile) -and -not (Test-Path -LiteralPath $tlsFile -PathType Leaf)) {
+            throw "TLS file was not found: $tlsFile"
+        }
+    }
+
+    if ($OTLP_ENDPOINT.StartsWith("http://", [StringComparison]::OrdinalIgnoreCase)) {
+        if ($OTLP_HEADERS_MAP.Count -gt 0) {
+            Write-Host "  ⚠ Authentication headers will be sent over plaintext HTTP. HTTPS is strongly recommended." -ForegroundColor Yellow
+        } else {
+            Write-Host "  ⚠ OTLP is configured over plaintext HTTP. Use this only on a trusted private network." -ForegroundColor Yellow
+        }
+    }
+    if ($OTLP_TLS_INSECURE_SKIP_VERIFY) {
+        Write-Host "  ⚠ TLS certificate verification is disabled for the OTLP Collector." -ForegroundColor Yellow
+    }
 }
 
 # Instance name with default
@@ -669,32 +895,6 @@ if ([string]::IsNullOrWhiteSpace($ENVIRONMENT)) {
     Write-Host "  → Using default: $ENVIRONMENT" -ForegroundColor Cyan
 }
 
-# Mimir endpoint with default
-Write-Host ""
-$MIMIR_ENDPOINT = Get-EnvValue @("ELVEN_MIMIR_ENDPOINT", "MIMIR_ENDPOINT")
-do {
-    if ([string]::IsNullOrWhiteSpace($MIMIR_ENDPOINT)) {
-        if (-not $AUTO_CONFIRM) {
-            $MIMIR_ENDPOINT = Read-Host "Mimir endpoint [default: https://mimir.elvenobservability.com/api/v1/push]"
-        }
-    } else {
-        Write-Host "  ✓ Using Mimir endpoint from environment: $MIMIR_ENDPOINT" -ForegroundColor Green
-    }
-
-    if ([string]::IsNullOrWhiteSpace($MIMIR_ENDPOINT)) {
-        $MIMIR_ENDPOINT = "https://mimir.elvenobservability.com/api/v1/push"
-        Write-Host "  → Using default (SaaS): $MIMIR_ENDPOINT" -ForegroundColor Cyan
-        break
-    } elseif ($MIMIR_ENDPOINT -match '^https?://') {
-        Write-Host "  → Using endpoint: $MIMIR_ENDPOINT" -ForegroundColor Cyan
-        break
-    } else {
-        Write-Host "  ✗ Endpoint must start with http:// or https://" -ForegroundColor Red
-        Write-Host "    Example: https://metrics.vibraenergia.com.br/api/v1/push" -ForegroundColor Yellow
-        $MIMIR_ENDPOINT = ""
-    }
-} while ($true)
-
 # Custom labels (optional)
 Write-Host ""
 $CustomLabels = @{}
@@ -710,11 +910,12 @@ if (-not [string]::IsNullOrWhiteSpace($customLabelsInput)) {
             $labelValue = $matches[2].Trim()
 
             if (-not (Test-PrometheusLabelName $labelName)) {
-                Write-Host "  ⚠ Skipping invalid label name: $labelName" -ForegroundColor Yellow
-                Write-Host "    Use Prometheus label format: letters, numbers, and underscore; cannot start with a number." -ForegroundColor Yellow
+                throw "Invalid Prometheus label name '$labelName'."
             } else {
                 $CustomLabels[$labelName] = $labelValue
             }
+        } else {
+            throw "Invalid custom label entry. Expected name=value."
         }
     }
     
@@ -755,13 +956,26 @@ if (-not [string]::IsNullOrWhiteSpace($customLabelsInput)) {
 
 Write-Host ""
 Write-Host "Summary:" -ForegroundColor Green
-Write-Host "  Tenant ID:  $TENANT_ID" -ForegroundColor White
+Write-Host "  Destination: $METRICS_DESTINATION" -ForegroundColor White
 Write-Host "  Instance:   $INSTANCE_NAME" -ForegroundColor White
 if (-not [string]::IsNullOrWhiteSpace($CUSTOMER_NAME)) {
     Write-Host "  Customer:   $CUSTOMER_NAME" -ForegroundColor White
 }
 Write-Host "  Environment: $ENVIRONMENT" -ForegroundColor White
-Write-Host "  Endpoint:    $MIMIR_ENDPOINT" -ForegroundColor White
+if ($METRICS_DESTINATION -eq "mimir") {
+    Write-Host "  Tenant ID:   $TENANT_ID" -ForegroundColor White
+    Write-Host "  Endpoint:    $MIMIR_ENDPOINT" -ForegroundColor White
+} else {
+    Write-Host "  Endpoint:    $OTLP_ENDPOINT" -ForegroundColor White
+    if (-not [string]::IsNullOrWhiteSpace($OTLP_TENANT_ID)) {
+        Write-Host "  Tenant ID:   $OTLP_TENANT_ID" -ForegroundColor White
+    }
+    if (-not [string]::IsNullOrWhiteSpace($OTLP_API_TOKEN)) {
+        Write-Host "  Bearer auth: configured" -ForegroundColor White
+    }
+    Write-Host "  OTLP headers: $($OTLP_HEADERS_MAP.Count) configured" -ForegroundColor White
+    Write-Host "  TLS verify:  $(if ($OTLP_TLS_INSECURE_SKIP_VERIFY) { 'disabled' } else { 'enabled' })" -ForegroundColor White
+}
 if ($CustomLabels.Count -gt 0) {
     Write-Host "  Custom Labels:" -ForegroundColor White
     foreach ($key in $CustomLabels.Keys) {
@@ -794,7 +1008,9 @@ New-Item -ItemType Directory -Force -Path $EXPORTER_DIR | Out-Null
 
 # Download Windows Exporter - USE STANDALONE BINARY INSTEAD OF MSI
 # MSI has issues on some systems, so we download the .exe directly
-$EXPORTER_URL = "https://github.com/prometheus-community/windows_exporter/releases/download/v${WINDOWS_EXPORTER_VERSION}/windows_exporter-${WINDOWS_EXPORTER_VERSION}-amd64.exe"
+$EXPORTER_ASSET_NAME = "windows_exporter-${WINDOWS_EXPORTER_VERSION}-amd64.exe"
+$EXPORTER_URL = "https://github.com/prometheus-community/windows_exporter/releases/download/v${WINDOWS_EXPORTER_VERSION}/${EXPORTER_ASSET_NAME}"
+$EXPORTER_CHECKSUM_URL = "https://github.com/prometheus-community/windows_exporter/releases/download/v${WINDOWS_EXPORTER_VERSION}/sha256sums.txt"
 $EXPORTER_EXE = "$EXPORTER_DIR\windows_exporter.exe"
 
 Write-Host "Downloading Windows Exporter v$WINDOWS_EXPORTER_VERSION (standalone binary)..." -ForegroundColor Green
@@ -802,6 +1018,10 @@ Write-Host "  Using direct .exe download (avoiding MSI issues)" -ForegroundColor
 
 if (-not (Download-WithRetry -Url $EXPORTER_URL -OutputPath $EXPORTER_EXE)) {
     Write-Host "✗ Failed to download Windows Exporter after multiple attempts." -ForegroundColor Red
+    Exit-WithPause 1
+}
+if (-not (Verify-Sha256FromManifest -FilePath $EXPORTER_EXE -AssetName $EXPORTER_ASSET_NAME -ManifestUrl $EXPORTER_CHECKSUM_URL)) {
+    Remove-Item $EXPORTER_EXE -Force -ErrorAction SilentlyContinue
     Exit-WithPause 1
 }
 
@@ -1134,8 +1354,11 @@ if (Test-Path $EXE_PATH) {
 Write-Host "Downloading OpenTelemetry Collector v$OTEL_VERSION..." -ForegroundColor Green
 
 # Official release assets used by this installer.
-$OTEL_ARCHIVE_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/otelcol-contrib_${OTEL_VERSION}_windows_amd64.tar.gz"
-$OTEL_MSI_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/otelcol-contrib_${OTEL_VERSION}_windows_x64.msi"
+$OTEL_ARCHIVE_ASSET_NAME = "otelcol-contrib_${OTEL_VERSION}_windows_amd64.tar.gz"
+$OTEL_MSI_ASSET_NAME = "otelcol-contrib_${OTEL_VERSION}_windows_x64.msi"
+$OTEL_ARCHIVE_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/$OTEL_ARCHIVE_ASSET_NAME"
+$OTEL_MSI_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/$OTEL_MSI_ASSET_NAME"
+$OTEL_CHECKSUM_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/opentelemetry-collector-releases_otelcol-contrib_checksums.txt"
 $OTEL_PATH = "$env:TEMP\otelcol.tar.gz"
 $OTEL_MSI_PATH = "$env:TEMP\otelcol-contrib.msi"
 
@@ -1151,6 +1374,9 @@ if ($hasTar) {
     if (-not (Download-WithRetry -Url $OTEL_ARCHIVE_URL -OutputPath $OTEL_PATH)) {
         Write-Host "✗ Failed to download Collector archive after multiple attempts." -ForegroundColor Red
         Write-Host "  URL tried: $OTEL_ARCHIVE_URL" -ForegroundColor Yellow
+    } elseif (-not (Verify-Sha256FromManifest -FilePath $OTEL_PATH -AssetName $OTEL_ARCHIVE_ASSET_NAME -ManifestUrl $OTEL_CHECKSUM_URL)) {
+        Remove-Item $OTEL_PATH -Force -ErrorAction SilentlyContinue
+        Write-Host "  ⚠ Collector archive checksum validation failed." -ForegroundColor Yellow
     } else {
         try {
             $tarOutput = tar -xzf $OTEL_PATH -C $INSTALL_DIR 2>&1
@@ -1180,6 +1406,8 @@ if (-not $collectorExtracted) {
     $collectorExtracted = Install-OtelCollectorFromMsi `
         -MsiUrl $OTEL_MSI_URL `
         -MsiPath $OTEL_MSI_PATH `
+        -MsiAssetName $OTEL_MSI_ASSET_NAME `
+        -ChecksumUrl $OTEL_CHECKSUM_URL `
         -InstallDir $INSTALL_DIR `
         -ExePath $EXE_PATH
 }
@@ -1220,11 +1448,10 @@ Write-Host "✓ Executable found!" -ForegroundColor Green
 # Create Collector configuration
 Write-Host "Creating Collector configuration..." -ForegroundColor Green
 
-$mimirEndpointYaml = ConvertTo-YamlQuotedString $MIMIR_ENDPOINT
-$tenantIdYaml = ConvertTo-YamlQuotedString $TENANT_ID
-$authorizationYaml = ConvertTo-YamlQuotedString "Bearer $API_TOKEN_PLAIN"
 $instanceNameYaml = ConvertTo-YamlQuotedString $INSTANCE_NAME
 $environmentYaml = ConvertTo-YamlQuotedString $ENVIRONMENT
+$extensionsYaml = ""
+$serviceExtensionsYaml = ""
 
 # Build customer label if provided
 $customerLabel = ""
@@ -1253,6 +1480,85 @@ if ($CustomLabels.Count -gt 0) {
     }
 }
 
+if ($METRICS_DESTINATION -eq "mimir") {
+    $mimirEndpointYaml = ConvertTo-YamlQuotedString $MIMIR_ENDPOINT
+    $tenantIdYaml = ConvertTo-YamlQuotedString $TENANT_ID
+    $authorizationYaml = ConvertTo-YamlQuotedString "Bearer $API_TOKEN_PLAIN"
+    $metricsExporterName = "prometheus_remote_write"
+    $exportersYaml = @"
+  prometheus_remote_write:
+    endpoint: $mimirEndpointYaml
+    headers:
+      'X-Scope-OrgID': $tenantIdYaml
+      'Authorization': $authorizationYaml
+    resource_to_telemetry_conversion:
+      enabled: true
+"@
+} else {
+    $endpointProperty = "endpoint"
+    $otlpUri = [Uri]$OTLP_ENDPOINT
+    if ($otlpUri.AbsolutePath -match '/v1/metrics/?$') {
+        $endpointProperty = "metrics_endpoint"
+    }
+
+    $headersSection = ""
+    if ($OTLP_HEADERS_MAP.Count -gt 0) {
+        $headersSection = "    headers:"
+        foreach ($headerName in ($OTLP_HEADERS_MAP.Keys | Sort-Object)) {
+            $headerNameYaml = ConvertTo-YamlQuotedString $headerName
+            $headerValueYaml = ConvertTo-YamlQuotedString $OTLP_HEADERS_MAP[$headerName]
+            $headersSection += "`n      ${headerNameYaml}: $headerValueYaml"
+        }
+    }
+
+    $tlsSection = ""
+    if (-not [string]::IsNullOrWhiteSpace($OTLP_TLS_CA_FILE) -or
+        -not [string]::IsNullOrWhiteSpace($OTLP_TLS_CERT_FILE) -or
+        $OTLP_TLS_INSECURE_SKIP_VERIFY) {
+        $tlsSection = "    tls:"
+        if (-not [string]::IsNullOrWhiteSpace($OTLP_TLS_CA_FILE)) {
+            $tlsSection += "`n      ca_file: $(ConvertTo-YamlQuotedString $OTLP_TLS_CA_FILE)"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($OTLP_TLS_CERT_FILE)) {
+            $tlsSection += "`n      cert_file: $(ConvertTo-YamlQuotedString $OTLP_TLS_CERT_FILE)"
+            $tlsSection += "`n      key_file: $(ConvertTo-YamlQuotedString $OTLP_TLS_KEY_FILE)"
+        }
+        if ($OTLP_TLS_INSECURE_SKIP_VERIFY) {
+            $tlsSection += "`n      insecure_skip_verify: true"
+        }
+    }
+
+    New-Item -ItemType Directory -Force -Path $OTEL_STORAGE_DIR | Out-Null
+    Set-CollectorConfigAcl -Path $OTEL_STORAGE_DIR
+    $storageDirYaml = ConvertTo-YamlQuotedString $OTEL_STORAGE_DIR
+    $extensionsYaml = @"
+extensions:
+  file_storage/otlp:
+    directory: $storageDirYaml
+"@
+    $serviceExtensionsYaml = "  extensions: [file_storage/otlp]"
+    $metricsExporterName = "otlphttp/collector"
+    $otlpEndpointYaml = ConvertTo-YamlQuotedString $OTLP_ENDPOINT
+    $exportersYaml = @"
+  otlphttp/collector:
+    ${endpointProperty}: $otlpEndpointYaml
+    compression: gzip
+    timeout: 30s
+$headersSection
+$tlsSection
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 10000
+      storage: file_storage/otlp
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 0s
+"@
+}
+
 $CONFIG_CONTENT = @"
 receivers:
   prometheus:
@@ -1263,16 +1569,17 @@ receivers:
           static_configs:
             - targets: ['localhost:9182']
 
+$extensionsYaml
+
 exporters:
-  prometheusremotewrite:
-    endpoint: $mimirEndpointYaml
-    headers:
-      X-Scope-OrgID: $tenantIdYaml
-      Authorization: $authorizationYaml
-    resource_to_telemetry_conversion:
-      enabled: true
+$exportersYaml
 
 processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+
   resource/add_labels:
     attributes:
       - action: insert
@@ -1289,27 +1596,23 @@ processors:
     timeout: 10s
     send_batch_size: 1024
 
-  filter:
-    metrics:
-      exclude:
-        match_type: regexp
-        metric_names:
-          - "go_.*"
-          - "scrape_.*"
-          - "otlp_.*"
-          - "promhttp_.*"
-          - "process_.*"
+  filter/drop_internal:
+    error_mode: ignore
+    metric_conditions:
+      - 'IsMatch(metric.name, "^(go_|scrape_|otlp_|promhttp_|process_).*")'
 
 service:
+$serviceExtensionsYaml
   pipelines:
     metrics:
       receivers: [prometheus]
-      processors: [resource/add_labels, batch, filter]
-      exporters: [prometheusremotewrite]
+      processors: [memory_limiter, resource/add_labels, filter/drop_internal, batch]
+      exporters: [$metricsExporterName]
 "@
 
 # Save with UTF8 encoding without BOM
 [System.IO.File]::WriteAllText($CONFIG_FILE, $CONFIG_CONTENT)
+Set-CollectorConfigAcl -Path $CONFIG_FILE
 Write-Host "✓ Configuration created!" -ForegroundColor Green
 
 # Validate configuration
@@ -1321,9 +1624,8 @@ try {
     } else {
         Write-Host "✗ Invalid configuration!" -ForegroundColor Red
         Write-Host $validateOutput -ForegroundColor Red
-        Write-Host ""
-        Write-Host "Config file contents:" -ForegroundColor Yellow
-        Get-Content $CONFIG_FILE | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+        Write-Host "  Config path: $CONFIG_FILE" -ForegroundColor Yellow
+        Write-Host "  Config contents are not printed because they may contain credentials." -ForegroundColor Yellow
         Exit-WithPause 1
     }
 } catch {
@@ -1405,9 +1707,8 @@ try {
     
 } catch {
     Write-Host "✗ Error creating/starting Collector service: $_" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "Debug - Config contents:" -ForegroundColor Yellow
-    Get-Content $CONFIG_FILE
+    Write-Host "  Config path: $CONFIG_FILE" -ForegroundColor Yellow
+    Write-Host "  Config contents are not printed because they may contain credentials." -ForegroundColor Yellow
     Exit-WithPause 1
 }
 
@@ -1450,8 +1751,17 @@ if (-not [string]::IsNullOrWhiteSpace($CUSTOMER_NAME)) {
     Write-Host "  Customer:     $CUSTOMER_NAME" -ForegroundColor White
 }
 Write-Host "  Environment:  $ENVIRONMENT" -ForegroundColor White
-Write-Host "  Tenant ID:    $TENANT_ID" -ForegroundColor White
-Write-Host "  Endpoint:     $MIMIR_ENDPOINT" -ForegroundColor White
+Write-Host "  Destination:  $METRICS_DESTINATION" -ForegroundColor White
+if ($METRICS_DESTINATION -eq "mimir") {
+    Write-Host "  Tenant ID:    $TENANT_ID" -ForegroundColor White
+    Write-Host "  Endpoint:     $MIMIR_ENDPOINT" -ForegroundColor White
+} else {
+    if (-not [string]::IsNullOrWhiteSpace($OTLP_TENANT_ID)) {
+        Write-Host "  Tenant ID:    $OTLP_TENANT_ID" -ForegroundColor White
+    }
+    Write-Host "  Endpoint:     $OTLP_ENDPOINT" -ForegroundColor White
+    Write-Host "  Queue:        persistent ($OTEL_STORAGE_DIR)" -ForegroundColor White
+}
 Write-Host ""
 Write-Host "Files:" -ForegroundColor Yellow
 Write-Host "  Collector:    $EXE_PATH" -ForegroundColor White
@@ -1471,7 +1781,11 @@ Write-Host ""
 Write-Host "  View logs:" -ForegroundColor White
 Write-Host "    Get-WinEvent -LogName Application -MaxEvents 20 | Where-Object {`$_.Message -like '*otelcol*'}" -ForegroundColor Gray
 Write-Host ""
-Write-Host "Grafana validation:" -ForegroundColor Yellow
+if ($METRICS_DESTINATION -eq "collector") {
+    Write-Host "Downstream validation (when the Collector exports to Prometheus/Mimir):" -ForegroundColor Yellow
+} else {
+    Write-Host "Grafana validation:" -ForegroundColor Yellow
+}
 if (-not [string]::IsNullOrWhiteSpace($CUSTOMER_NAME)) {
     Write-Host "  Query: {instance=`"$INSTANCE_NAME`", customer=`"$CUSTOMER_NAME`"}" -ForegroundColor White
 } else {

@@ -4,13 +4,19 @@ Universal installer for **Node Exporter** + **OpenTelemetry Collector** on Linux
 
 ## 🚀 Quick Installation
 
-### Option 1: One-liner (direct execution)
+### Direct to Elven Mimir
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-instrumentation.sh | sudo bash
 ```
 
-### Option 2: Download and run (recommended for production)
+### To another OpenTelemetry Collector (OTLP/HTTP)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-collector-instrumentation.sh | sudo bash
+```
+
+### Download and review before running (recommended for production)
 
 ```bash
 # Download
@@ -40,8 +46,8 @@ sudo ./install.sh
 
 ## 🔧 What does the script install?
 
-1. **Node Exporter (v1.8.2)** - Collects Linux system metrics
-2. **OpenTelemetry Collector (v0.114.0)** - Scrapes and forwards metrics to Mimir
+1. **Node Exporter (v1.12.1)** - Collects Linux system metrics
+2. **OpenTelemetry Collector Contrib (v0.156.0)** - Scrapes metrics and exports to Mimir or another Collector
 
 ## 📊 Metrics collected
 
@@ -71,13 +77,16 @@ node_network_receive_bytes_total
 
 ## 📝 Configuration
 
-During installation, you'll be prompted for:
+Both entrypoints share the same installation engine. The direct entrypoint requires a Mimir tenant and API token. The dedicated Collector entrypoint asks for:
 
-- **Tenant ID** - Your Elven Observability tenant identifier
-- **API Token** - Authentication token for Mimir
+- **OTLP/HTTP endpoint** - Base URL such as `https://collector.example.com:4318`, or a full `/v1/metrics` URL
+- **Tenant ID** - Optional `X-Scope-OrgID` header
+- **API Token** - Optional Bearer token
 - **Instance Name** - Server identifier (default: hostname)
 - **Customer Name** - Optional customer/company name
 - **Environment** - production/staging/dev (default: production)
+
+The remote Collector must expose an OTLP/HTTP metrics receiver. When a base URL is supplied, the exporter appends `/v1/metrics` automatically.
 
 ## 🛠️ Useful commands
 
@@ -118,6 +127,7 @@ sudo /opt/monitoring/otelcol/otelcol-contrib validate --config=/etc/otelcol/conf
 - **Node Exporter**: `/opt/monitoring/node_exporter/node_exporter`
 - **OpenTelemetry Collector**: `/opt/monitoring/otelcol/otelcol-contrib`
 - **Configuration**: `/etc/otelcol/config.yaml`
+- **Persistent OTLP queue**: `/var/lib/otelcol/file_storage` (Collector mode only)
 - **Systemd services**: 
   - `/etc/systemd/system/node_exporter.service`
   - `/etc/systemd/system/otelcol.service`
@@ -125,12 +135,14 @@ sudo /opt/monitoring/otelcol/otelcol-contrib validate --config=/etc/otelcol/conf
 ## 🔒 Security
 
 The script:
-- ✅ Validates downloads before execution
-- ✅ Uses HTTPS for all connections
+- ✅ Verifies release artifacts with SHA-256 before extraction
+- ✅ Uses HTTPS for all installer and release downloads
 - ✅ Installs only from official sources (GitHub releases)
 - ✅ Validates configuration before starting services
 - ✅ Runs services as root (required for full system metrics access)
-- ⚠️ Stores API token in collector config file (`/etc/otelcol/config.yaml` - readable only by root)
+- ✅ Stores `/etc/otelcol/config.yaml` as mode `0600`
+- ✅ Stores the persistent OTLP queue in a mode `0700` directory
+- ⚠️ Credentials are stored in the restricted Collector config when authentication is configured
 
 ## 🏗️ Architecture
 
@@ -144,7 +156,7 @@ Linux Server
             ├─> Scrapes Node Exporter
             ├─> Adds labels (instance, environment, customer, distro)
             ├─> Batches metrics
-            └─> Forwards to Mimir (remote write)
+            └─> Mimir (remote write) or another Collector (OTLP/HTTP)
 ```
 
 ## 🔄 Supported Architectures
@@ -205,9 +217,11 @@ systemctl status node_exporter otelcol
 curl -s http://localhost:9100/metrics | grep node_cpu
 ```
 
-3. Verify network connectivity to Mimir:
+3. Verify network connectivity to the configured destination:
 ```bash
 curl -I https://mimir.elvenobservability.com
+# Collector example:
+curl -I https://collector.example.com:4318
 ```
 
 4. Check collector logs for errors:
@@ -268,7 +282,7 @@ sudo rm -rf /etc/otelcol
 
 ## 🔥 Firewall Configuration
 
-If you have a firewall enabled, you may need to allow outbound HTTPS:
+If you have a firewall enabled, allow outbound traffic to the selected destination. This is normally TCP `443`; a private OTLP/HTTP receiver commonly uses TCP `4318`.
 
 ### UFW (Ubuntu/Debian)
 ```bash
@@ -298,17 +312,44 @@ The script automatically detects and uses the appropriate package manager:
 
 ## 🌐 Environment Variables (Advanced)
 
-You can pre-set variables to skip prompts:
+### Direct Mimir mode
 
 ```bash
-export TENANT_ID="your-tenant-id"
-export API_TOKEN="your-api-token"
-export INSTANCE_NAME="server-01"
-export CUSTOMER_NAME="acme-corp"
-export ENVIRONMENT="production"
-
-curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-instrumentation.sh | sudo -E bash
+curl -fsSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-instrumentation.sh | \
+  sudo env \
+    ELVEN_TENANT_ID="your-tenant-id" \
+    ELVEN_API_TOKEN="your-api-token" \
+    ELVEN_INSTANCE_NAME="server-01" \
+    ELVEN_ENVIRONMENT="production" \
+    ELVEN_AUTO_CONFIRM="true" \
+    bash
 ```
+
+### Remote Collector mode
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-collector-instrumentation.sh | \
+  sudo env \
+    ELVEN_OTLP_ENDPOINT="https://collector.example.com:4318" \
+    ELVEN_OTLP_TENANT_ID="your-tenant-id" \
+    ELVEN_OTLP_API_TOKEN="your-api-token" \
+    ELVEN_INSTANCE_NAME="server-01" \
+    ELVEN_ENVIRONMENT="production" \
+    ELVEN_AUTO_CONFIRM="true" \
+    bash
+```
+
+Optional Collector variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `ELVEN_OTLP_HEADERS` | Extra headers in `name=value,name2=value2` format. Values may contain `=`, but not commas. |
+| `ELVEN_OTLP_TLS_CA_FILE` | Custom CA certificate path. |
+| `ELVEN_OTLP_TLS_CERT_FILE` | mTLS client certificate path. Must be used with the key. |
+| `ELVEN_OTLP_TLS_KEY_FILE` | mTLS client key path. Must be used with the certificate. |
+| `ELVEN_OTLP_TLS_INSECURE_SKIP_VERIFY` | Disables certificate verification when `true`. Emergency use only. |
+
+`http://` endpoints are accepted for trusted private networks, but the installer warns when authentication headers would cross plaintext HTTP.
 
 ## 📞 Support
 
@@ -652,6 +693,7 @@ For issues or questions:
 | Task | Command |
 |------|---------|
 | **Install** | `curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-instrumentation.sh \| sudo bash` |
+| **Install to remote Collector** | `curl -fsSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-collector-instrumentation.sh \| sudo bash` |
 | **Check Status** | `systemctl status node_exporter otelcol` |
 | **Restart** | `sudo systemctl restart otelcol` |
 | **Logs** | `journalctl -u otelcol -f` |

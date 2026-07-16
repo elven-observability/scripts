@@ -12,7 +12,7 @@ These scripts provide one-liner installation of observability agents for the **E
 - **Linux**: Faro Collector (Frontend Instrumentation → Loki)
 - **Linux**: Zabbix Proxy 7.0 LTS + PostgreSQL 17 (for Zabbix monitoring infrastructure)
 
-The instrumentation scripts automatically install, configure, and start monitoring services that send metrics to your Elven Observability Mimir instance or logs to Loki with elven-logs-collector/Faro collectors. The Zabbix Proxy script sets up a complete Zabbix proxy infrastructure with PostgreSQL database.
+The instrumentation scripts automatically install, configure, and start monitoring services. VM metrics can be sent directly to Elven Observability Mimir or to another OpenTelemetry Collector over OTLP/HTTP. Logs are sent to Loki by the elven-logs-collector/Faro collectors. The Zabbix Proxy script sets up a complete Zabbix proxy infrastructure with PostgreSQL database.
 
 ## 🚀 Quick Start
 
@@ -25,6 +25,14 @@ Open **PowerShell as Administrator**:
 ```
 
 📖 [Full Windows Documentation](./windows/)
+
+### Windows (Metrics → another OTel Collector)
+
+Open **PowerShell as Administrator**:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr -useb https://raw.githubusercontent.com/elven-observability/scripts/main/windows/windows-collector-instrumentation.ps1 | iex
+```
 
 ### Windows (elven-logs-collector)
 
@@ -45,6 +53,14 @@ curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/lin
 ```
 
 📖 [Full Linux Documentation](./linux/)
+
+### Linux (Metrics → another OTel Collector)
+
+Run as **root or with sudo**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-collector-instrumentation.sh | sudo bash
+```
 
 ### Collector FE – Faro (Linux)
 
@@ -75,6 +91,7 @@ curl -sSL https://raw.githubusercontent.com/elven-observability/scripts/main/lin
 ### Smart Installation
 - ✅ Automatic dependency installation
 - ✅ Download with retry logic
+- ✅ SHA-256 validation against official release manifests
 - ✅ Configuration validation
 - ✅ Systemd/Windows service creation
 - ✅ Automatic service startup
@@ -120,7 +137,9 @@ Server (Windows/Linux)
             ├─> Scrapes exporter metrics
             ├─> Adds custom labels (instance, environment, customer)
             ├─> Batches and filters metrics
-            └─> Forwards to Mimir (Prometheus Remote Write)
+            └─> Selected destination
+                    ├─> Mimir (Prometheus Remote Write)
+                    └─> Remote OTel Collector (OTLP/HTTP)
 ```
 
 ## 📁 Repository Structure
@@ -128,7 +147,8 @@ Server (Windows/Linux)
 ```
 scripts/
 ├── windows/
-│   ├── windows-instrumentation.ps1     # Windows Exporter + OTel Collector
+│   ├── windows-instrumentation.ps1     # Shared Windows metrics installer
+│   ├── windows-collector-instrumentation.ps1 # Dedicated OTLP entrypoint
 │   ├── elven-logs-collector/
 │   │   ├── windows-logs-instrumentation.ps1
 │   │   └── README.md
@@ -136,7 +156,8 @@ scripts/
 └── linux/
     ├── README.md
     ├── node_exporter/
-    │   └── linux-instrumentation.sh   # Node Exporter + OTel Collector
+    │   ├── linux-instrumentation.sh   # Shared Linux metrics installer
+    │   └── linux-collector-instrumentation.sh # Dedicated OTLP entrypoint
     ├── collector-fe/
     │   ├── install.sh                 # Faro Collector (FE → Loki)
     │   └── README.md
@@ -150,11 +171,41 @@ The interactive installers prompt for:
 
 | Parameter | Description | Default | Required |
 |-----------|-------------|---------|----------|
-| Tenant ID | Your Elven Observability tenant | - | ✅ Yes |
-| API Token | Authentication token | - | ✅ Yes |
+| Metrics destination | `mimir` or `collector` | `mimir` | ✅ Yes |
+| Tenant ID | Tenant header; required for Mimir, optional for OTLP | - | Destination-specific |
+| API Token | Bearer token; required for Mimir, optional for OTLP | - | Destination-specific |
+| OTLP endpoint | Remote Collector base URL or `/v1/metrics` URL | - | Collector only |
 | Instance Name | Server identifier | hostname | ❌ No |
 | Customer Name | Customer/company identifier | none | ❌ No |
 | Environment | Environment label | production | ❌ No |
+
+### Remote Collector requirement
+
+The dedicated Collector entrypoints export metrics with OTLP/HTTP. The destination must expose an OTLP HTTP receiver; a minimal receiver is:
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  batch: {}
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [your_metrics_backend]
+```
+
+Expose this receiver through TLS and authentication whenever traffic crosses an untrusted network. The VM-side installers preserve resource attributes and add a persistent sending queue, but routing and final backend authentication remain the responsibility of the remote Collector.
 
 ## 🎨 Labels Applied
 
@@ -280,29 +331,34 @@ sudo /opt/monitoring/otelcol/otelcol-contrib validate --config=/etc/otelcol/conf
 
 1. Verify services are running
 2. Test exporter endpoint locally (Windows: port 9182, Linux: port 9100)
-3. Check network connectivity to Mimir
-4. Verify credentials (Tenant ID and API Token)
+3. Check network connectivity to the configured Mimir or OTLP destination
+4. Verify destination-specific credentials and headers
 
 ### Network connectivity issues
 
-Ensure outbound HTTPS (443) is allowed to:
-- `mimir.elvenobservability.com`
+Allow outbound connectivity to the selected destination:
+
+- Direct mode: `mimir.elvenobservability.com:443`
+- Collector mode: the configured OTLP/HTTP host and port, normally `443` or `4318`
 
 ## 🔒 Security Considerations
 
 - ✅ Scripts install only from official GitHub releases
 - ✅ All downloads use HTTPS
-- ✅ Metrics tokens are stored in restricted configs; elven-logs-collector stores the token in the service registry environment, not in `config.alloy`
-- ✅ Services run with minimal required privileges
+- ✅ Release artifacts are verified with SHA-256 before extraction or execution
+- ✅ Metrics configs are restricted to root/Administrators and SYSTEM
+- ✅ Persistent OTLP queues are stored in restricted directories
+- ✅ Config contents containing credentials are never printed during error handling
+- ✅ Linux Collector service applies a restrictive umask and `NoNewPrivileges`; Windows paths use explicit SYSTEM/Administrators ACLs
 - ⚠️ Review scripts before running in production (always good practice)
 
 ## 📦 Supported Versions
 
 | Component | Version | Source |
 |-----------|---------|--------|
-| Windows Exporter | 0.27.3 | [prometheus-community/windows_exporter](https://github.com/prometheus-community/windows_exporter) |
-| Node Exporter | 1.8.2 | [prometheus/node_exporter](https://github.com/prometheus/node_exporter) |
-| OpenTelemetry Collector | 0.114.0 | [open-telemetry/opentelemetry-collector-releases](https://github.com/open-telemetry/opentelemetry-collector-releases) |
+| Windows Exporter | 0.31.7 | [prometheus-community/windows_exporter](https://github.com/prometheus-community/windows_exporter) |
+| Node Exporter | 1.12.1 | [prometheus/node_exporter](https://github.com/prometheus/node_exporter) |
+| OpenTelemetry Collector | 0.156.0 | [open-telemetry/opentelemetry-collector-releases](https://github.com/open-telemetry/opentelemetry-collector-releases) |
 | elven-logs-collector runtime | 1.16.0 | [grafana/alloy](https://github.com/grafana/alloy) |
 
 ## 🌐 Supported Platforms
@@ -354,6 +410,7 @@ We welcome contributions! Please:
 | Task | Windows | Linux |
 |------|---------|-------|
 | **Install** | `[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr -useb <url> \| iex` | `curl -sSL <url> \| sudo bash` |
+| **Install to remote Collector** | `iwr -useb .../windows-collector-instrumentation.ps1 \| iex` | `curl -fsSL .../linux-collector-instrumentation.sh \| sudo bash` |
 | **Check Status** | `Get-Service otelcol` | `systemctl status otelcol` |
 | **Restart** | `Restart-Service otelcol` | `sudo systemctl restart otelcol` |
 | **Logs** | `Get-WinEvent` | `journalctl -u otelcol -f` |
