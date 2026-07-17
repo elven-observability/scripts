@@ -425,7 +425,6 @@ get_user_input() {
     CUSTOM_LABELS=$(get_env_value ELVEN_CUSTOM_LABELS CUSTOM_LABELS || true)
 
     OTLP_ENDPOINT=$(get_env_value ELVEN_OTLP_ENDPOINT OTLP_ENDPOINT OTEL_EXPORTER_OTLP_ENDPOINT || true)
-    OTLP_TENANT_ID=$(get_env_value ELVEN_OTLP_TENANT_ID OTLP_TENANT_ID || true)
     token_input=$(get_env_value ELVEN_OTLP_API_TOKEN OTLP_API_TOKEN || true)
     OTLP_API_TOKEN=$(normalize_api_token "$token_input")
     OTLP_HEADERS=$(get_env_value ELVEN_OTLP_HEADERS OTLP_HEADERS || true)
@@ -521,9 +520,6 @@ get_user_input() {
             exit 1
         fi
 
-        if [ -z "$OTLP_TENANT_ID" ] && [ "$non_interactive" != "true" ]; then
-            read -r -p "Collector tenant ID / X-Scope-OrgID (optional): " OTLP_TENANT_ID < /dev/tty
-        fi
         if [ -z "$OTLP_API_TOKEN" ] && [ "$non_interactive" != "true" ]; then
             read -r -p "Configure a Bearer token for the Collector? [y/N]: " add_token < /dev/tty
             if [[ "$add_token" =~ ^[Yy]$ ]]; then
@@ -543,12 +539,7 @@ get_user_input() {
                 print_error "Authorization is configured twice: use ELVEN_OTLP_API_TOKEN or ELVEN_OTLP_HEADERS, not both."
                 exit 1
             fi
-            if [ "${label_name,,}" = "x-scope-orgid" ] && [ -n "$OTLP_TENANT_ID" ]; then
-                print_error "X-Scope-OrgID is configured twice: use ELVEN_OTLP_TENANT_ID or ELVEN_OTLP_HEADERS, not both."
-                exit 1
-            fi
         done
-        [ -n "$OTLP_TENANT_ID" ] && OTLP_HEADERS_MAP["X-Scope-OrgID"]="$OTLP_TENANT_ID"
         [ -n "$OTLP_API_TOKEN" ] && OTLP_HEADERS_MAP["Authorization"]="Bearer $OTLP_API_TOKEN"
 
         validate_otlp_tls_files || exit 1
@@ -618,7 +609,6 @@ get_user_input() {
         echo "  Endpoint:    $MIMIR_ENDPOINT"
     else
         echo "  Endpoint:    $OTLP_ENDPOINT"
-        [ -n "$OTLP_TENANT_ID" ] && echo "  Tenant ID:   $OTLP_TENANT_ID"
         [ -n "$OTLP_API_TOKEN" ] && echo "  Bearer auth: configured"
         echo "  OTLP headers: ${#OTLP_HEADERS_MAP[@]} configured"
         echo "  TLS verify:  $([ "$OTLP_TLS_INSECURE_SKIP_VERIFY" = "true" ] && echo disabled || echo enabled)"
@@ -1164,7 +1154,6 @@ print_summary() {
         echo "  Tenant ID:    $TENANT_ID"
         echo "  Endpoint:     $MIMIR_ENDPOINT"
     else
-        [ -n "$OTLP_TENANT_ID" ] && echo "  Tenant ID:    $OTLP_TENANT_ID"
         echo "  Endpoint:     $OTLP_ENDPOINT"
         echo "  Queue:        persistent ($OTEL_STORAGE_DIR)"
     fi

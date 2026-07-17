@@ -80,13 +80,12 @@ node_network_receive_bytes_total
 Both entrypoints share the same installation engine. The direct entrypoint requires a Mimir tenant and API token. The dedicated Collector entrypoint asks for:
 
 - **OTLP/HTTP endpoint** - Base URL such as `https://collector.example.com:4318`, or a full `/v1/metrics` URL
-- **Tenant ID** - Optional `X-Scope-OrgID` header
 - **API Token** - Optional Bearer token
 - **Instance Name** - Server identifier (default: hostname)
 - **Customer Name** - Optional customer/company name
 - **Environment** - production/staging/dev (default: production)
 
-The remote Collector must expose an OTLP/HTTP metrics receiver. When a base URL is supplied, the exporter appends `/v1/metrics` automatically.
+The remote Collector must expose an OTLP/HTTP metrics receiver. When a base URL is supplied, the exporter appends `/v1/metrics` automatically. The VM does not ask for or automatically send a backend tenant header; configure the Mimir tenant on the remote Collector.
 
 ## 🛠️ Useful commands
 
@@ -331,7 +330,6 @@ curl -fsSL https://raw.githubusercontent.com/elven-observability/scripts/main/li
 curl -fsSL https://raw.githubusercontent.com/elven-observability/scripts/main/linux/node_exporter/linux-collector-instrumentation.sh | \
   sudo env \
     ELVEN_OTLP_ENDPOINT="https://collector.example.com:4318" \
-    ELVEN_OTLP_TENANT_ID="your-tenant-id" \
     ELVEN_OTLP_API_TOKEN="your-api-token" \
     ELVEN_INSTANCE_NAME="server-01" \
     ELVEN_ENVIRONMENT="production" \

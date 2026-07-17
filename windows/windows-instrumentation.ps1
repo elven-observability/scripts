@@ -741,7 +741,6 @@ $TENANT_ID = ""
 $API_TOKEN_PLAIN = ""
 $MIMIR_ENDPOINT = ""
 $OTLP_ENDPOINT = ""
-$OTLP_TENANT_ID = ""
 $OTLP_API_TOKEN = ""
 $OTLP_HEADERS_MAP = @{}
 $OTLP_TLS_CA_FILE = Get-EnvValue @("ELVEN_OTLP_TLS_CA_FILE", "OTLP_TLS_CA_FILE")
@@ -807,11 +806,6 @@ if ($METRICS_DESTINATION -eq "mimir") {
         throw "OTLP endpoint must be a valid http:// or https:// URL."
     }
 
-    $OTLP_TENANT_ID = Get-EnvValue @("ELVEN_OTLP_TENANT_ID", "OTLP_TENANT_ID")
-    if ([string]::IsNullOrWhiteSpace($OTLP_TENANT_ID) -and -not $AUTO_CONFIRM) {
-        $OTLP_TENANT_ID = Read-Host "Collector tenant ID / X-Scope-OrgID (optional)"
-    }
-
     $otlpTokenInput = Get-EnvValue @("ELVEN_OTLP_API_TOKEN", "OTLP_API_TOKEN")
     $OTLP_API_TOKEN = Normalize-ApiToken $otlpTokenInput
     if ([string]::IsNullOrWhiteSpace($OTLP_API_TOKEN) -and -not $AUTO_CONFIRM) {
@@ -828,12 +822,6 @@ if ($METRICS_DESTINATION -eq "mimir") {
     $OTLP_HEADERS_MAP = ConvertFrom-OtlpHeaderList (Get-EnvValue @("ELVEN_OTLP_HEADERS", "OTLP_HEADERS"))
     if ($OTLP_HEADERS_MAP.ContainsKey("Authorization") -and -not [string]::IsNullOrWhiteSpace($OTLP_API_TOKEN)) {
         throw "Authorization is configured twice. Use ELVEN_OTLP_API_TOKEN or ELVEN_OTLP_HEADERS, not both."
-    }
-    if ($OTLP_HEADERS_MAP.ContainsKey("X-Scope-OrgID") -and -not [string]::IsNullOrWhiteSpace($OTLP_TENANT_ID)) {
-        throw "X-Scope-OrgID is configured twice. Use ELVEN_OTLP_TENANT_ID or ELVEN_OTLP_HEADERS, not both."
-    }
-    if (-not [string]::IsNullOrWhiteSpace($OTLP_TENANT_ID)) {
-        $OTLP_HEADERS_MAP["X-Scope-OrgID"] = $OTLP_TENANT_ID
     }
     if (-not [string]::IsNullOrWhiteSpace($OTLP_API_TOKEN)) {
         $OTLP_HEADERS_MAP["Authorization"] = "Bearer $OTLP_API_TOKEN"
@@ -967,9 +955,6 @@ if ($METRICS_DESTINATION -eq "mimir") {
     Write-Host "  Endpoint:    $MIMIR_ENDPOINT" -ForegroundColor White
 } else {
     Write-Host "  Endpoint:    $OTLP_ENDPOINT" -ForegroundColor White
-    if (-not [string]::IsNullOrWhiteSpace($OTLP_TENANT_ID)) {
-        Write-Host "  Tenant ID:   $OTLP_TENANT_ID" -ForegroundColor White
-    }
     if (-not [string]::IsNullOrWhiteSpace($OTLP_API_TOKEN)) {
         Write-Host "  Bearer auth: configured" -ForegroundColor White
     }
@@ -1756,9 +1741,6 @@ if ($METRICS_DESTINATION -eq "mimir") {
     Write-Host "  Tenant ID:    $TENANT_ID" -ForegroundColor White
     Write-Host "  Endpoint:     $MIMIR_ENDPOINT" -ForegroundColor White
 } else {
-    if (-not [string]::IsNullOrWhiteSpace($OTLP_TENANT_ID)) {
-        Write-Host "  Tenant ID:    $OTLP_TENANT_ID" -ForegroundColor White
-    }
     Write-Host "  Endpoint:     $OTLP_ENDPOINT" -ForegroundColor White
     Write-Host "  Queue:        persistent ($OTEL_STORAGE_DIR)" -ForegroundColor White
 }

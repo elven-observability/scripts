@@ -40,7 +40,6 @@ Automated installation:
 
 ```powershell
 $env:ELVEN_OTLP_ENDPOINT = "https://collector.example.com:4318"
-$env:ELVEN_OTLP_TENANT_ID = "your-tenant-id"       # Optional
 $env:ELVEN_OTLP_API_TOKEN = "your-token"            # Optional
 $env:ELVEN_INSTANCE_NAME = $env:COMPUTERNAME.ToLower()
 $env:ELVEN_ENVIRONMENT = "production"
@@ -118,11 +117,12 @@ windows_net_bytes_received_total
 The direct entrypoint requires a Mimir tenant and API token. The dedicated Collector entrypoint asks for:
 
 - **OTLP/HTTP endpoint** - Base URL such as `https://collector.example.com:4318`, or a full `/v1/metrics` URL
-- **Tenant ID** - Optional `X-Scope-OrgID` header
 - **API Token** - Optional Bearer token
 - **Instance Name** - Server identifier (default: hostname)
 - **Customer Name** - Optional customer/company name
 - **Environment** - production/staging/dev (default: production)
+
+The VM does not ask for or automatically send a backend tenant header. Configure the Mimir tenant on the remote Collector.
 
 Optional Collector variables:
 

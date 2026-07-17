@@ -172,9 +172,10 @@ The interactive installers prompt for:
 | Parameter | Description | Default | Required |
 |-----------|-------------|---------|----------|
 | Metrics destination | `mimir` or `collector` | `mimir` | ✅ Yes |
-| Tenant ID | Tenant header; required for Mimir, optional for OTLP | - | Destination-specific |
-| API Token | Bearer token; required for Mimir, optional for OTLP | - | Destination-specific |
+| Mimir tenant ID | Tenant used by direct Prometheus Remote Write | - | Mimir only |
+| Mimir API token | Bearer token used by direct Prometheus Remote Write | - | Mimir only |
 | OTLP endpoint | Remote Collector base URL or `/v1/metrics` URL | - | Collector only |
+| Collector authentication | Optional Bearer token, custom headers, custom CA, or mTLS | none | ❌ No |
 | Instance Name | Server identifier | hostname | ❌ No |
 | Customer Name | Customer/company identifier | none | ❌ No |
 | Environment | Environment label | production | ❌ No |
@@ -205,7 +206,7 @@ service:
       exporters: [your_metrics_backend]
 ```
 
-Expose this receiver through TLS and authentication whenever traffic crosses an untrusted network. The VM-side installers preserve resource attributes and add a persistent sending queue, but routing and final backend authentication remain the responsibility of the remote Collector.
+Expose this receiver through TLS and authentication whenever traffic crosses an untrusted network. The VM-side installers do not ask for or automatically inject a backend tenant header. Configure the Mimir tenant, routing, and final backend authentication on the remote Collector.
 
 ## 🎨 Labels Applied
 
