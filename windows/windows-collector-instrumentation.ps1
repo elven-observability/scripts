@@ -11,12 +11,16 @@ try {
     $localInstaller = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { $null } else { Join-Path $PSScriptRoot "windows-instrumentation.ps1" }
     if ($localInstaller -and (Test-Path -LiteralPath $localInstaller -PathType Leaf)) {
         Write-Host "Using the local shared Windows instrumentation installer..." -ForegroundColor Cyan
-        $installerContent = [IO.File]::ReadAllText($localInstaller)
+        $installerContent = [IO.File]::ReadAllText($localInstaller, [Text.Encoding]::UTF8)
     } else {
         Write-Host "Downloading the official Elven Windows instrumentation installer..." -ForegroundColor Cyan
         $webClient = New-Object System.Net.WebClient
         $webClient.Headers.Add("User-Agent", "Elven-Observability-Installer")
-        $installerContent = $webClient.DownloadString($baseInstallerUrl)
+        # Windows PowerShell 5.1 can decode DownloadString responses with the
+        # system ANSI code page. Decode the raw bytes explicitly as UTF-8 so
+        # non-ASCII status messages cannot corrupt the PowerShell source.
+        $installerBytes = $webClient.DownloadData($baseInstallerUrl)
+        $installerContent = [Text.Encoding]::UTF8.GetString($installerBytes)
     }
     if ([string]::IsNullOrWhiteSpace($installerContent)) {
         throw "Downloaded installer is empty."
