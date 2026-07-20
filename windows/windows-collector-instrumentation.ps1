@@ -4,7 +4,7 @@
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$baseInstallerUrl = "https://raw.githubusercontent.com/elven-observability/scripts/main/windows/windows-instrumentation.ps1"
+$baseInstallerUrl = "https://raw.githubusercontent.com/elven-observability/scripts/main/windows/windows-instrumentation.ps1?cacheBust=$([DateTime]::UtcNow.Ticks)"
 $previousDestination = [Environment]::GetEnvironmentVariable("ELVEN_METRICS_DESTINATION", "Process")
 
 try {

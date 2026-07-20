@@ -1343,7 +1343,7 @@ $OTEL_ARCHIVE_ASSET_NAME = "otelcol-contrib_${OTEL_VERSION}_windows_amd64.tar.gz
 $OTEL_MSI_ASSET_NAME = "otelcol-contrib_${OTEL_VERSION}_windows_x64.msi"
 $OTEL_ARCHIVE_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/$OTEL_ARCHIVE_ASSET_NAME"
 $OTEL_MSI_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/$OTEL_MSI_ASSET_NAME"
-$OTEL_CHECKSUM_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/opentelemetry-collector-releases_otelcol-contrib_checksums.txt"
+$OTEL_WINDOWS_CHECKSUM_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$OTEL_VERSION/opentelemetry-collector-releases_otelcol-contrib_windows_checksums.txt"
 $OTEL_PATH = "$env:TEMP\otelcol.tar.gz"
 $OTEL_MSI_PATH = "$env:TEMP\otelcol-contrib.msi"
 
@@ -1359,7 +1359,7 @@ if ($hasTar) {
     if (-not (Download-WithRetry -Url $OTEL_ARCHIVE_URL -OutputPath $OTEL_PATH)) {
         Write-Host "✗ Failed to download Collector archive after multiple attempts." -ForegroundColor Red
         Write-Host "  URL tried: $OTEL_ARCHIVE_URL" -ForegroundColor Yellow
-    } elseif (-not (Verify-Sha256FromManifest -FilePath $OTEL_PATH -AssetName $OTEL_ARCHIVE_ASSET_NAME -ManifestUrl $OTEL_CHECKSUM_URL)) {
+    } elseif (-not (Verify-Sha256FromManifest -FilePath $OTEL_PATH -AssetName $OTEL_ARCHIVE_ASSET_NAME -ManifestUrl $OTEL_WINDOWS_CHECKSUM_URL)) {
         Remove-Item $OTEL_PATH -Force -ErrorAction SilentlyContinue
         Write-Host "  ⚠ Collector archive checksum validation failed." -ForegroundColor Yellow
     } else {
@@ -1392,7 +1392,7 @@ if (-not $collectorExtracted) {
         -MsiUrl $OTEL_MSI_URL `
         -MsiPath $OTEL_MSI_PATH `
         -MsiAssetName $OTEL_MSI_ASSET_NAME `
-        -ChecksumUrl $OTEL_CHECKSUM_URL `
+        -ChecksumUrl $OTEL_WINDOWS_CHECKSUM_URL `
         -InstallDir $INSTALL_DIR `
         -ExePath $EXE_PATH
 }
