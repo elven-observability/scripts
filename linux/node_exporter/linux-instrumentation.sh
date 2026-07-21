@@ -197,29 +197,23 @@ detect_distro() {
     case $OS in
         ubuntu|debian)
             PKG_MANAGER="apt"
-            PKG_UPDATE="apt update"
-            PKG_INSTALL="apt install -y"
             ;;
         rhel|centos|rocky|almalinux|ol)
             if command -v dnf &> /dev/null; then
                 PKG_MANAGER="dnf"
-                PKG_UPDATE="dnf check-update || true"
-                PKG_INSTALL="dnf install -y"
             else
                 PKG_MANAGER="yum"
-                PKG_UPDATE="yum check-update || true"
-                PKG_INSTALL="yum install -y"
             fi
             ;;
         fedora)
             PKG_MANAGER="dnf"
-            PKG_UPDATE="dnf check-update || true"
-            PKG_INSTALL="dnf install -y"
             ;;
         amzn)
-            PKG_MANAGER="yum"
-            PKG_UPDATE="yum check-update || true"
-            PKG_INSTALL="yum install -y"
+            if command -v dnf &> /dev/null; then
+                PKG_MANAGER="dnf"
+            else
+                PKG_MANAGER="yum"
+            fi
             ;;
         *)
             print_error "Unsupported distribution: $OS"
@@ -231,15 +225,84 @@ detect_distro() {
     print_success "Package manager: $PKG_MANAGER"
 }
 
+update_package_cache() {
+    local status
+
+    case "$PKG_MANAGER" in
+        apt)
+            apt update
+            ;;
+        dnf|yum)
+            # check-update returns 100 when updates are available; that is not an error.
+            "$PKG_MANAGER" check-update || {
+                status=$?
+                [ "$status" -eq 100 ]
+            }
+            ;;
+    esac
+}
+
+install_packages() {
+    case "$PKG_MANAGER" in
+        apt)
+            apt install -y "$@"
+            ;;
+        dnf|yum)
+            "$PKG_MANAGER" install -y "$@"
+            ;;
+    esac
+}
+
+package_for_command() {
+    case "$1" in
+        curl)
+            # Amazon Linux 2023 ships curl-minimal by default. Installing the full
+            # curl package alongside it causes a package conflict.
+            if [ "$OS" = "amzn" ] && [[ "${VERSION_ID:-}" == 2023* ]]; then
+                printf '%s' "curl-minimal"
+            else
+                printf '%s' "curl"
+            fi
+            ;;
+        tar|gzip)
+            printf '%s' "$1"
+            ;;
+    esac
+}
+
 # Install dependencies
 install_dependencies() {
+    local command_name
+    local package_name
+    local update_log
+    local install_log
+    local -a missing_commands=()
+    local -a packages=()
+
     print_info "Installing dependencies..."
-    
+
+    for command_name in curl tar gzip; do
+        if ! command -v "$command_name" &> /dev/null; then
+            missing_commands+=("$command_name")
+            package_name=$(package_for_command "$command_name")
+            packages+=("$package_name")
+        fi
+    done
+
+    if [ "${#missing_commands[@]}" -eq 0 ]; then
+        print_success "Dependencies already available; no packages changed."
+        return 0
+    fi
+
+    print_info "  → Missing commands: ${missing_commands[*]}"
+
     # Update package cache
     print_info "  → Updating package cache..."
-    if ! $PKG_UPDATE 2>&1 | tee /tmp/pkg_update.log; then
+    update_log=$(mktemp /tmp/elven-pkg-update.XXXXXX)
+    chmod 600 "$update_log"
+    if ! update_package_cache 2>&1 | tee "$update_log"; then
         # Check for RHEL subscription issues
-        if grep -qi "subscription\|entitlement\|cdn.redhat.com" /tmp/pkg_update.log; then
+        if grep -qi "subscription\|entitlement\|cdn.redhat.com" "$update_log"; then
             print_error "Red Hat subscription issue detected!"
             print_info ""
             print_info "This RHEL system is not properly registered."
@@ -255,45 +318,46 @@ install_dependencies() {
             echo "3. Use CentOS/Rocky repos (alternative):"
             echo "   sudo dnf install -y https://dl.rockylinux.org/pub/rocky/8/BaseOS/x86_64/os/Packages/r/rocky-release-8.9-1.6.el8.noarch.rpm"
             print_info ""
-            rm /tmp/pkg_update.log
+            rm -f "$update_log"
             exit 1
         fi
         print_warning "Package update had issues, continuing anyway..."
     fi
-    rm -f /tmp/pkg_update.log
-    
+    rm -f "$update_log"
+
     # Install packages with proper error handling
-    print_info "  → Installing curl, tar, gzip..."
-    if ! $PKG_INSTALL curl tar gzip 2>&1 | tee /tmp/pkg_install.log; then
+    print_info "  → Installing packages: ${packages[*]}"
+    install_log=$(mktemp /tmp/elven-pkg-install.XXXXXX)
+    chmod 600 "$install_log"
+    if ! install_packages "${packages[@]}" 2>&1 | tee "$install_log"; then
         # Check for subscription issues again
-        if grep -qi "subscription\|entitlement\|cdn.redhat.com" /tmp/pkg_install.log; then
+        if grep -qi "subscription\|entitlement\|cdn.redhat.com" "$install_log"; then
             print_error "Red Hat subscription issue detected during package installation!"
             print_info "See solutions above"
-            rm /tmp/pkg_install.log
+            rm -f "$install_log"
             exit 1
         fi
-        
+
         print_error "Failed to install dependencies!"
-        cat /tmp/pkg_install.log
-        rm /tmp/pkg_install.log
+        rm -f "$install_log"
         exit 1
     fi
-    rm -f /tmp/pkg_install.log
-    
+    rm -f "$install_log"
+
     # Verify installation
     print_info "  → Verifying installation..."
-    local missing=""
-    for cmd in curl tar gzip; do
-        if ! command -v $cmd &> /dev/null; then
-            missing="$missing $cmd"
+    missing_commands=()
+    for command_name in curl tar gzip; do
+        if ! command -v "$command_name" &> /dev/null; then
+            missing_commands+=("$command_name")
         fi
     done
-    
-    if [ -n "$missing" ]; then
-        print_error "Missing commands after installation:$missing"
+
+    if [ "${#missing_commands[@]}" -ne 0 ]; then
+        print_error "Missing commands after installation: ${missing_commands[*]}"
         exit 1
     fi
-    
+
     print_success "Dependencies installed!"
 }
 
@@ -700,14 +764,14 @@ configure_selinux() {
     if [ "$PKG_MANAGER" = "apt" ]; then
         if ! command -v semanage &> /dev/null; then
             print_info "  → Installing SELinux utilities..."
-            $PKG_INSTALL policycoreutils-python-utils 2>/dev/null || \
-            $PKG_INSTALL policycoreutils 2>/dev/null || true
+            install_packages policycoreutils-python-utils 2>/dev/null || \
+            install_packages policycoreutils 2>/dev/null || true
         fi
     else
         if ! command -v semanage &> /dev/null; then
             print_info "  → Installing SELinux utilities..."
-            $PKG_INSTALL policycoreutils-python-utils 2>/dev/null || \
-            $PKG_INSTALL policycoreutils-python 2>/dev/null || true
+            install_packages policycoreutils-python-utils 2>/dev/null || \
+            install_packages policycoreutils-python 2>/dev/null || true
         fi
     fi
     
