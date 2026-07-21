@@ -23,15 +23,17 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Parse installer with Windows PowerShell 5.1
         shell: powershell
         run: |
+          $installerPath = (Resolve-Path "windows/windows-instrumentation.ps1").Path
+          $installerContent = [System.IO.File]::ReadAllText($installerPath, [System.Text.Encoding]::UTF8)
           $errors = $null
           $tokens = $null
-          [void][System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path "windows/windows-instrumentation.ps1"),
+          [void][System.Management.Automation.Language.Parser]::ParseInput(
+            $installerContent,
             [ref]$tokens,
             [ref]$errors
           )
