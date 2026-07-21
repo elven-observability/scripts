@@ -236,7 +236,8 @@ Restart-Service windows_exporter
 Restart-Service otelcol
 
 # View logs
-Get-WinEvent -LogName Application -MaxEvents 20 | Where-Object {$_.Message -like '*otelcol*'}
+Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='otelcol'} -MaxEvents 20 | Format-List TimeCreated, LevelDisplayName, Message
+Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Service Control Manager'} -MaxEvents 50 | Where-Object {$_.Message -like '*otelcol*'}
 ```
 
 ### Linux
@@ -313,7 +314,8 @@ sudo rm -rf /etc/otelcol
 **Windows:**
 ```powershell
 # Check logs
-Get-WinEvent -LogName Application | Where-Object {$_.Message -like '*otelcol*'} | Select -First 20
+Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='otelcol'} -MaxEvents 20 | Format-List TimeCreated, LevelDisplayName, Message
+Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Service Control Manager'} -MaxEvents 50 | Where-Object {$_.Message -like '*otelcol*'} | Select-Object -First 20
 
 # Validate config
 & "C:\Program Files\OpenTelemetry Collector\otelcol-contrib.exe" validate --config="C:\Program Files\OpenTelemetry Collector\config.yaml"

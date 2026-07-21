@@ -154,7 +154,8 @@ Invoke-WebRequest http://localhost:9182/metrics
 
 ### View logs
 ```powershell
-Get-WinEvent -LogName Application -MaxEvents 20 | Where-Object {$_.Message -like '*otelcol*'}
+Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='otelcol'} -MaxEvents 20 | Format-List TimeCreated, LevelDisplayName, Message
+Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Service Control Manager'} -MaxEvents 50 | Where-Object {$_.Message -like '*otelcol*'}
 ```
 
 ### Validate configuration
@@ -201,7 +202,8 @@ Windows Server
 
 1. Check logs:
 ```powershell
-Get-WinEvent -LogName Application -MaxEvents 50 | Where-Object {$_.Message -like '*otelcol*'} | Format-List
+Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='otelcol'} -MaxEvents 50 | Format-List TimeCreated, LevelDisplayName, Message
+Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Service Control Manager'} -MaxEvents 50 | Where-Object {$_.Message -like '*otelcol*'} | Format-List TimeCreated, LevelDisplayName, Message
 ```
 
 2. Test configuration:

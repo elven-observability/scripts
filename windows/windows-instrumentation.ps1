@@ -203,6 +203,77 @@ function Set-CollectorConfigAcl {
     }
 }
 
+function Register-CollectorEventLogSource {
+    param([string]$ServiceName)
+
+    # The Collector opens an Application Event Log source named after the
+    # Windows service before it starts. New-Service does not create that source,
+    # so a manually registered Collector otherwise exits with Windows error 1501.
+    $eventSourcePath = "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\$ServiceName"
+    $eventMessageFile = "%SystemRoot%\System32\EventCreate.exe"
+
+    try {
+        New-Item -Path $eventSourcePath -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $eventSourcePath `
+                         -Name "EventMessageFile" `
+                         -Value $eventMessageFile `
+                         -PropertyType ExpandString `
+                         -Force `
+                         -ErrorAction Stop | Out-Null
+    } catch {
+        throw "Could not register the Collector Application Event Log source '$ServiceName': $($_.Exception.Message)"
+    }
+}
+
+function Write-CollectorServiceDiagnostics {
+    param(
+        [string]$ServiceName,
+        [datetime]$Since
+    )
+
+    Write-Host "Collector service diagnostics:" -ForegroundColor Yellow
+
+    $serviceQuery = & sc.exe queryex $ServiceName 2>&1
+    if ($serviceQuery) {
+        $serviceQuery | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+    }
+
+    $eventsFound = $false
+    try {
+        $collectorEvents = @(
+            Get-WinEvent -FilterHashtable @{ LogName = "Application"; StartTime = $Since } `
+                         -MaxEvents 50 `
+                         -ErrorAction SilentlyContinue |
+                Where-Object { $_.ProviderName -eq $ServiceName }
+        )
+        foreach ($event in $collectorEvents) {
+            $eventsFound = $true
+            Write-Host "  [Application][$($event.TimeCreated)] $($event.LevelDisplayName): $($event.Message)" -ForegroundColor Red
+        }
+    } catch {
+        Write-Host "  Could not read Collector Application events: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    try {
+        $serviceControlEvents = @(
+            Get-WinEvent -FilterHashtable @{ LogName = "System"; ProviderName = "Service Control Manager"; StartTime = $Since } `
+                         -MaxEvents 50 `
+                         -ErrorAction SilentlyContinue |
+                Where-Object { $_.Message -like "*$ServiceName*" }
+        )
+        foreach ($event in $serviceControlEvents) {
+            $eventsFound = $true
+            Write-Host "  [System][$($event.TimeCreated)] $($event.LevelDisplayName): $($event.Message)" -ForegroundColor Red
+        }
+    } catch {
+        Write-Host "  Could not read Service Control Manager events: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    if (-not $eventsFound) {
+        Write-Host "  No matching Collector or Service Control Manager events were found." -ForegroundColor Yellow
+    }
+}
+
 function Verify-Sha256FromManifest {
     param(
         [string]$FilePath,
@@ -1630,6 +1701,10 @@ Write-Host "Creating OpenTelemetry Collector service..." -ForegroundColor Green
 $FULL_COMMAND = "`"$EXE_PATH`" --config=`"$CONFIG_URI`""
 
 try {
+    Write-Host "Registering Collector Application Event Log source..." -ForegroundColor Green
+    Register-CollectorEventLogSource -ServiceName $OTEL_SERVICE_NAME
+    Write-Host "✓ Event Log source registered!" -ForegroundColor Green
+
     New-Service -Name $OTEL_SERVICE_NAME `
                 -BinaryPathName $FULL_COMMAND `
                 -DisplayName "OpenTelemetry Collector" `
@@ -1644,7 +1719,8 @@ try {
     
     # Start service with retry logic
     Write-Host "Starting Collector..." -ForegroundColor Green
-    
+
+    $serviceStartTime = (Get-Date).AddSeconds(-5)
     $maxAttempts = 3
     $attempt = 0
     $started = $false
@@ -1675,19 +1751,14 @@ try {
     if (-not $started) {
         Write-Host "✗ Failed to start Collector after $maxAttempts attempts" -ForegroundColor Red
         Write-Host ""
-        Write-Host "Checking logs..." -ForegroundColor Yellow
-        Get-WinEvent -LogName Application -MaxEvents 10 -ErrorAction SilentlyContinue | 
-            Where-Object {$_.Message -like "*otelcol*"} | 
-            ForEach-Object { 
-                Write-Host "  [$($_.TimeCreated)] $($_.LevelDisplayName): $($_.Message)" -ForegroundColor Red 
-            }
+        Write-CollectorServiceDiagnostics -ServiceName $OTEL_SERVICE_NAME -Since $serviceStartTime
         Write-Host ""
         Write-Host "Troubleshooting:" -ForegroundColor Yellow
         Write-Host "  1. Validate config: & '$EXE_PATH' validate --config='$CONFIG_URI'" -ForegroundColor White
         Write-Host "  2. Test manually: & '$EXE_PATH' --config='$CONFIG_URI'" -ForegroundColor White
         Write-Host "  3. Check config file: notepad '$CONFIG_FILE'" -ForegroundColor White
         Write-Host ""
-        Exit-WithPause 1
+        throw "Collector service did not remain running after $maxAttempts attempts."
     }
     
 } catch {
@@ -1761,7 +1832,8 @@ Write-Host "  Test Windows Exporter:" -ForegroundColor White
 Write-Host "    Invoke-WebRequest http://localhost:9182/metrics" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  View logs:" -ForegroundColor White
-Write-Host "    Get-WinEvent -LogName Application -MaxEvents 20 | Where-Object {`$_.Message -like '*otelcol*'}" -ForegroundColor Gray
+Write-Host "    Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='$OTEL_SERVICE_NAME'} -MaxEvents 20 | Format-List TimeCreated, LevelDisplayName, Message" -ForegroundColor Gray
+Write-Host "    Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Service Control Manager'} -MaxEvents 50 | Where-Object {`$_.Message -like '*$OTEL_SERVICE_NAME*'}" -ForegroundColor Gray
 Write-Host ""
 if ($METRICS_DESTINATION -eq "collector") {
     Write-Host "Downstream validation (when the Collector exports to Prometheus/Mimir):" -ForegroundColor Yellow
@@ -1802,7 +1874,8 @@ Write-Host "  If OpenTelemetry Collector won't start:" -ForegroundColor White
 Write-Host "    1. Validate config:" -ForegroundColor Gray
 Write-Host "       & 'C:\Program Files\OpenTelemetry Collector\otelcol-contrib.exe' validate --config='file:C:/Program Files/OpenTelemetry Collector/config.yaml'" -ForegroundColor Gray
 Write-Host "    2. Check event logs:" -ForegroundColor Gray
-Write-Host "       Get-WinEvent -LogName Application -MaxEvents 20 | Where {`$_.Message -like '*otelcol*'}" -ForegroundColor Gray
+Write-Host "       Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='$OTEL_SERVICE_NAME'} -MaxEvents 20 | Format-List TimeCreated, LevelDisplayName, Message" -ForegroundColor Gray
+Write-Host "       Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Service Control Manager'} -MaxEvents 50 | Where-Object {`$_.Message -like '*$OTEL_SERVICE_NAME*'}" -ForegroundColor Gray
 Write-Host "    3. Test manually:" -ForegroundColor Gray
 Write-Host "       & 'C:\Program Files\OpenTelemetry Collector\otelcol-contrib.exe' --config='file:C:/Program Files/OpenTelemetry Collector/config.yaml'" -ForegroundColor Gray
 Write-Host ""
