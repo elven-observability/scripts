@@ -189,17 +189,61 @@ function ConvertFrom-OtlpHeaderList {
     return $headers
 }
 
-function Set-CollectorConfigAcl {
+function Invoke-CollectorIcacls {
+    param(
+        [string]$Path,
+        [string[]]$Arguments
+    )
+
+    $aclOutput = & icacls.exe $Path @Arguments 2>&1
+    $aclExitCode = $LASTEXITCODE
+    if ($aclExitCode -ne 0) {
+        throw "icacls failed for '$Path' with exit code ${aclExitCode}: $aclOutput"
+    }
+}
+
+function Set-CollectorPathAcl {
     param([string]$Path)
 
     $item = Get-Item -LiteralPath $Path -ErrorAction Stop
     if ($item.PSIsContainer) {
-        $aclOutput = & icacls.exe $Path /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' /T /C 2>&1
+        # Reinstallations must preserve queued telemetry while repairing ACLs
+        # inherited from older runs or manual troubleshooting. Taking ownership
+        # and resetting first removes stale deny entries that override grants.
+        Invoke-CollectorIcacls -Path $Path -Arguments @('/setowner', '*S-1-5-32-544', '/T', '/Q')
+        Invoke-CollectorIcacls -Path $Path -Arguments @('/reset', '/T', '/Q')
+        Invoke-CollectorIcacls -Path $Path -Arguments @(
+            '/inheritance:r',
+            '/grant:r',
+            '*S-1-5-18:(OI)(CI)(F)',
+            '*S-1-5-32-544:(OI)(CI)(F)',
+            '/T',
+            '/Q'
+        )
+        Invoke-CollectorIcacls -Path $Path -Arguments @('/setowner', '*S-1-5-18', '/T', '/Q')
     } else {
-        $aclOutput = & icacls.exe $Path /inheritance:r /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' 2>&1
+        Invoke-CollectorIcacls -Path $Path -Arguments @(
+            '/inheritance:r',
+            '/grant:r',
+            '*S-1-5-18:(F)',
+            '*S-1-5-32-544:(F)',
+            '/Q'
+        )
     }
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not restrict Collector path ACL: $aclOutput"
+}
+
+function Move-LegacyCollectorQueue {
+    param([string]$StorageDirectory)
+
+    $legacyQueuePath = Join-Path $StorageDirectory "exporter_otlphttp_collector_metrics"
+    $currentQueuePath = Join-Path $StorageDirectory "exporter_otlp_http_collector_metrics"
+
+    if ((Test-Path -LiteralPath $legacyQueuePath) -and -not (Test-Path -LiteralPath $currentQueuePath)) {
+        Write-Host "  → Migrating the persistent queue to the current OTLP HTTP component name..." -ForegroundColor Cyan
+        Move-Item -LiteralPath $legacyQueuePath -Destination $currentQueuePath -ErrorAction Stop
+        Write-Host "  ✓ Persistent queue migrated without deleting queued telemetry" -ForegroundColor Green
+    } elseif ((Test-Path -LiteralPath $legacyQueuePath) -and (Test-Path -LiteralPath $currentQueuePath)) {
+        Write-Host "  ⚠ Legacy and current persistent queues both exist; preserving both and using the current queue." -ForegroundColor Yellow
     }
 }
 
@@ -1585,18 +1629,20 @@ if ($METRICS_DESTINATION -eq "mimir") {
     }
 
     New-Item -ItemType Directory -Force -Path $OTEL_STORAGE_DIR | Out-Null
-    Set-CollectorConfigAcl -Path $OTEL_STORAGE_DIR
+    Set-CollectorPathAcl -Path $OTEL_STORAGE_DIR
+    Move-LegacyCollectorQueue -StorageDirectory $OTEL_STORAGE_DIR
     $storageDirYaml = ConvertTo-YamlQuotedString $OTEL_STORAGE_DIR
     $extensionsYaml = @"
 extensions:
   file_storage/otlp:
     directory: $storageDirYaml
+    create_directory: true
 "@
     $serviceExtensionsYaml = "  extensions: [file_storage/otlp]"
-    $metricsExporterName = "otlphttp/collector"
+    $metricsExporterName = "otlp_http/collector"
     $otlpEndpointYaml = ConvertTo-YamlQuotedString $OTLP_ENDPOINT
     $exportersYaml = @"
-  otlphttp/collector:
+  otlp_http/collector:
     ${endpointProperty}: $otlpEndpointYaml
     compression: gzip
     timeout: 30s
@@ -1668,7 +1714,7 @@ $serviceExtensionsYaml
 
 # Save with UTF8 encoding without BOM
 [System.IO.File]::WriteAllText($CONFIG_FILE, $CONFIG_CONTENT)
-Set-CollectorConfigAcl -Path $CONFIG_FILE
+Set-CollectorPathAcl -Path $CONFIG_FILE
 Write-Host "✓ Configuration created!" -ForegroundColor Green
 
 # Validate configuration

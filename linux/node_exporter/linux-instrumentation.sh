@@ -1046,13 +1046,23 @@ install_otel_collector() {
         fi
 
         mkdir -p "$OTEL_STORAGE_DIR"
-        chmod 700 "$OTEL_STORAGE_DIR"
+        local legacy_queue_path="$OTEL_STORAGE_DIR/exporter_otlphttp_collector_metrics"
+        local current_queue_path="$OTEL_STORAGE_DIR/exporter_otlp_http_collector_metrics"
+        if [ -e "$legacy_queue_path" ] && [ ! -e "$current_queue_path" ]; then
+            print_info "  → Migrating the persistent queue to the current OTLP HTTP component name..."
+            mv "$legacy_queue_path" "$current_queue_path"
+            print_success "Persistent queue migrated without deleting queued telemetry"
+        elif [ -e "$legacy_queue_path" ] && [ -e "$current_queue_path" ]; then
+            print_warning "Legacy and current persistent queues both exist; preserving both and using the current queue."
+        fi
+        chmod -R u+rwX,go-rwx "$OTEL_STORAGE_DIR"
         extensions_yaml="extensions:
   file_storage/otlp:
-    directory: $(yaml_quote "$OTEL_STORAGE_DIR")"
+    directory: $(yaml_quote "$OTEL_STORAGE_DIR")
+    create_directory: true"
         service_extensions_yaml="  extensions: [file_storage/otlp]"
-        exporter_name="otlphttp/collector"
-        exporters_yaml="  otlphttp/collector:
+        exporter_name="otlp_http/collector"
+        exporters_yaml="  otlp_http/collector:
     ${endpoint_property}: $(yaml_quote "$OTLP_ENDPOINT")
     compression: gzip
     timeout: 30s

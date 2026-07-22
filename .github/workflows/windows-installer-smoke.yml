@@ -51,16 +51,49 @@ jobs:
           ELVEN_CUSTOMER_NAME: "elven-ci"
           ELVEN_ENVIRONMENT: "test"
         run: |
-          & "windows/windows-collector-instrumentation.ps1"
-          if ($global:LASTEXITCODE -ne 0) {
-            throw "Installer exited with code $global:LASTEXITCODE"
+          function Invoke-ElvenInstaller {
+            $global:LASTEXITCODE = 0
+            & "windows/windows-collector-instrumentation.ps1"
+            if ($global:LASTEXITCODE -ne 0) {
+              throw "Installer exited with code $global:LASTEXITCODE"
+            }
           }
+
+          $storageDirectory = "C:\ProgramData\OpenTelemetry Collector\file_storage"
+          $currentQueuePath = Join-Path $storageDirectory "exporter_otlp_http_collector_metrics"
+          $legacyQueuePath = Join-Path $storageDirectory "exporter_otlphttp_collector_metrics"
+
+          # First install creates a real Collector persistent queue.
+          Invoke-ElvenInstaller
+          for ($attempt = 1; $attempt -le 30 -and -not (Test-Path -LiteralPath $currentQueuePath); $attempt++) {
+            Start-Sleep -Seconds 2
+          }
+          if (-not (Test-Path -LiteralPath $currentQueuePath)) {
+            throw "The first installation did not create the persistent queue."
+          }
+
+          Stop-Service -Name "otelcol" -Force -ErrorAction Stop
+          (Get-Service -Name "otelcol").WaitForStatus("Stopped", [TimeSpan]::FromSeconds(30))
+          Move-Item -LiteralPath $currentQueuePath -Destination $legacyQueuePath -ErrorAction Stop
+
+          # Reproduce the customer state: an old queue that explicitly denies SYSTEM.
+          & icacls.exe $legacyQueuePath /inheritance:r /deny '*S-1-5-18:(F)' /Q
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not seed the stale queue ACL regression fixture."
+          }
+
+          # The second install must repair ACLs, migrate the real queue, and start.
+          Invoke-ElvenInstaller
 
           Start-Sleep -Seconds 10
           $collector = Get-Service -Name "otelcol" -ErrorAction Stop
           $exporter = Get-Service -Name "windows_exporter" -ErrorAction Stop
           if ($collector.Status -ne "Running" -or $exporter.Status -ne "Running") {
             throw "Services are not running: otelcol=$($collector.Status), windows_exporter=$($exporter.Status)"
+          }
+
+          if ((Test-Path -LiteralPath $legacyQueuePath) -or -not (Test-Path -LiteralPath $currentQueuePath)) {
+            throw "The real legacy persistent queue was not preserved and migrated."
           }
 
           $eventSourcePath = "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\otelcol"
