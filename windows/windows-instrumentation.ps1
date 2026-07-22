@@ -202,6 +202,18 @@ function Invoke-CollectorIcacls {
     }
 }
 
+function Invoke-CollectorTakeOwnership {
+    param([string]$Path)
+
+    # takeown uses SeTakeOwnershipPrivilege, so it can recover objects even
+    # when a stale explicit deny ACE prevents LocalSystem from opening them.
+    $ownershipOutput = & takeown.exe /F $Path /A /R /D Y 2>&1
+    $ownershipExitCode = $LASTEXITCODE
+    if ($ownershipExitCode -ne 0) {
+        throw "takeown failed for '$Path' with exit code ${ownershipExitCode}: $ownershipOutput"
+    }
+}
+
 function Set-CollectorPathAcl {
     param([string]$Path)
 
@@ -210,7 +222,13 @@ function Set-CollectorPathAcl {
         # Reinstallations must preserve queued telemetry while repairing ACLs
         # inherited from older runs or manual troubleshooting. Taking ownership
         # and resetting first removes stale deny entries that override grants.
-        Invoke-CollectorIcacls -Path $Path -Arguments @('/setowner', '*S-1-5-32-544', '/T', '/Q')
+        Invoke-CollectorTakeOwnership -Path $Path
+        Invoke-CollectorIcacls -Path $Path -Arguments @(
+            '/grant:r',
+            '*S-1-5-32-544:(OI)(CI)(F)',
+            '/T',
+            '/Q'
+        )
         Invoke-CollectorIcacls -Path $Path -Arguments @('/reset', '/T', '/Q')
         Invoke-CollectorIcacls -Path $Path -Arguments @(
             '/inheritance:r',
