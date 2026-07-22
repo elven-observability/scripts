@@ -225,7 +225,7 @@ function Set-CollectorPathAcl {
         Invoke-CollectorTakeOwnership -Path $Path
         Invoke-CollectorIcacls -Path $Path -Arguments @(
             '/grant:r',
-            '*S-1-5-32-544:(OI)(CI)(F)',
+            '*S-1-5-32-544:(F)',
             '/T',
             '/Q'
         )
@@ -233,9 +233,15 @@ function Set-CollectorPathAcl {
         Invoke-CollectorIcacls -Path $Path -Arguments @(
             '/inheritance:r',
             '/grant:r',
+            '*S-1-5-18:(F)',
+            '*S-1-5-32-544:(F)',
+            '/T',
+            '/Q'
+        )
+        Invoke-CollectorIcacls -Path $Path -Arguments @(
+            '/grant:r',
             '*S-1-5-18:(OI)(CI)(F)',
             '*S-1-5-32-544:(OI)(CI)(F)',
-            '/T',
             '/Q'
         )
     } else {
