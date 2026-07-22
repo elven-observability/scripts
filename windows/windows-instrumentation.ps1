@@ -692,7 +692,8 @@ function Test-Prerequisites {
     # 7. Check PowerShell version and extraction method
     Write-Host "7. Checking PowerShell version..." -ForegroundColor Yellow
     $psVersion = $PSVersionTable.PSVersion
-    $hasTar = $null -ne (Get-Command tar -ErrorAction SilentlyContinue)
+    $forcePortableExtraction = Test-EnvFlag @("ELVEN_FORCE_PORTABLE_ARCHIVE_EXTRACTION")
+    $hasTar = -not $forcePortableExtraction -and $null -ne (Get-Command tar -ErrorAction SilentlyContinue)
     
     if ($psVersion.Major -ge 5) {
         Write-Host "   ✓ PowerShell $($psVersion.Major).$($psVersion.Minor) is supported" -ForegroundColor Green
@@ -709,7 +710,7 @@ function Test-Prerequisites {
     if ($hasTar) {
         Write-Host "   → Will use tar for extraction (modern system)" -ForegroundColor Cyan
     } else {
-        Write-Host "   → Will use official MSI extraction fallback (legacy system)" -ForegroundColor Cyan
+        Write-Host "   → Will use built-in .NET archive extraction (legacy-compatible)" -ForegroundColor Cyan
     }
     
     Write-Host ""
@@ -795,6 +796,176 @@ function Download-WithRetry {
     return $false
 }
 
+function Expand-OtelCollectorArchivePortable {
+    param(
+        [string]$ArchivePath,
+        [string]$DestinationPath
+    )
+
+    $archiveStream = $null
+    $gzipStream = $null
+    $outputStream = $null
+
+    try {
+        Write-Host "  Using built-in .NET tar.gz extraction for this legacy Windows host..." -ForegroundColor Cyan
+
+        $archiveStream = [System.IO.File]::Open(
+            $ArchivePath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read
+        )
+        $gzipStream = New-Object System.IO.Compression.GZipStream(
+            $archiveStream,
+            [System.IO.Compression.CompressionMode]::Decompress
+        )
+
+        $header = New-Object byte[] 512
+        $buffer = New-Object byte[] 1048576
+        $targetFound = $false
+
+        while ($true) {
+            $headerOffset = 0
+            while ($headerOffset -lt $header.Length) {
+                $bytesRead = $gzipStream.Read($header, $headerOffset, $header.Length - $headerOffset)
+                if ($bytesRead -eq 0) {
+                    break
+                }
+                $headerOffset += $bytesRead
+            }
+
+            if ($headerOffset -eq 0) {
+                break
+            }
+            if ($headerOffset -ne $header.Length) {
+                throw "Collector archive contains a truncated tar header."
+            }
+
+            $isZeroBlock = $true
+            for ($index = 0; $index -lt $header.Length; $index++) {
+                if ($header[$index] -ne 0) {
+                    $isZeroBlock = $false
+                    break
+                }
+            }
+            if ($isZeroBlock) {
+                break
+            }
+
+            $checksumText = ([System.Text.Encoding]::ASCII.GetString($header, 148, 8)).Trim([char]0, [char]32)
+            if ([string]::IsNullOrWhiteSpace($checksumText)) {
+                throw "Collector archive contains a tar entry without a checksum."
+            }
+            $expectedChecksum = [Convert]::ToInt64($checksumText, 8)
+            [long]$actualChecksum = 0
+            for ($index = 0; $index -lt $header.Length; $index++) {
+                if ($index -ge 148 -and $index -lt 156) {
+                    $actualChecksum += 32
+                } else {
+                    $actualChecksum += $header[$index]
+                }
+            }
+            if ($actualChecksum -ne $expectedChecksum) {
+                throw "Collector archive contains an invalid tar header checksum."
+            }
+
+            $entryName = ([System.Text.Encoding]::ASCII.GetString($header, 0, 100)).Trim([char]0)
+            $entryPrefix = ([System.Text.Encoding]::ASCII.GetString($header, 345, 155)).Trim([char]0)
+            if (-not [string]::IsNullOrWhiteSpace($entryPrefix)) {
+                $entryName = "$entryPrefix/$entryName"
+            }
+
+            $sizeText = ([System.Text.Encoding]::ASCII.GetString($header, 124, 12)).Trim([char]0, [char]32)
+            [long]$entrySize = 0
+            if (-not [string]::IsNullOrWhiteSpace($sizeText)) {
+                $entrySize = [Convert]::ToInt64($sizeText, 8)
+            }
+            if ($entrySize -lt 0) {
+                throw "Collector archive contains an invalid negative entry size."
+            }
+
+            $typeFlag = [char]$header[156]
+            $isRegularFile = ($header[156] -eq 0 -or $typeFlag -eq '0')
+            $isCollectorExecutable = $isRegularFile -and
+                ([System.IO.Path]::GetFileName($entryName) -eq "otelcol-contrib.exe")
+
+            if ($isCollectorExecutable) {
+                $destinationDirectory = [System.IO.Path]::GetDirectoryName($DestinationPath)
+                if (-not [string]::IsNullOrWhiteSpace($destinationDirectory)) {
+                    New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
+                }
+                $outputStream = [System.IO.File]::Open(
+                    $DestinationPath,
+                    [System.IO.FileMode]::Create,
+                    [System.IO.FileAccess]::Write,
+                    [System.IO.FileShare]::None
+                )
+            }
+
+            [long]$remaining = $entrySize
+            while ($remaining -gt 0) {
+                $bytesToRead = [int][Math]::Min([long]$buffer.Length, $remaining)
+                $bytesRead = $gzipStream.Read($buffer, 0, $bytesToRead)
+                if ($bytesRead -le 0) {
+                    throw "Collector archive ended before the tar entry was complete."
+                }
+                if ($isCollectorExecutable) {
+                    $outputStream.Write($buffer, 0, $bytesRead)
+                }
+                $remaining -= $bytesRead
+            }
+
+            if ($isCollectorExecutable) {
+                $outputStream.Dispose()
+                $outputStream = $null
+                $targetFound = $true
+            }
+
+            [long]$paddingSize = (512 - ($entrySize % 512)) % 512
+            while ($paddingSize -gt 0) {
+                $bytesToRead = [int][Math]::Min([long]$buffer.Length, $paddingSize)
+                $bytesRead = $gzipStream.Read($buffer, 0, $bytesToRead)
+                if ($bytesRead -le 0) {
+                    throw "Collector archive ended inside tar padding."
+                }
+                $paddingSize -= $bytesRead
+            }
+        }
+
+        if (-not $targetFound) {
+            throw "otelcol-contrib.exe was not found in the verified Collector archive."
+        }
+        if (-not (Test-Path -LiteralPath $DestinationPath -PathType Leaf)) {
+            throw "Portable extraction did not create the Collector executable."
+        }
+        if ((Get-Item -LiteralPath $DestinationPath).Length -le 0) {
+            throw "Portable extraction created an empty Collector executable."
+        }
+
+        $fileSize = (Get-Item -LiteralPath $DestinationPath).Length / 1MB
+        Write-Host "✓ Collector extracted with built-in .NET ($([math]::Round($fileSize, 2)) MB)" -ForegroundColor Green
+        return $true
+    } catch {
+        Write-Host "  ⚠ Built-in .NET archive extraction failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        if ($outputStream) {
+            $outputStream.Dispose()
+            $outputStream = $null
+        }
+        Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+        return $false
+    } finally {
+        if ($outputStream) {
+            $outputStream.Dispose()
+        }
+        if ($gzipStream) {
+            $gzipStream.Dispose()
+        }
+        if ($archiveStream) {
+            $archiveStream.Dispose()
+        }
+    }
+}
+
 function Install-OtelCollectorFromMsi {
     param(
         [string]$MsiUrl,
@@ -818,16 +989,19 @@ function Install-OtelCollectorFromMsi {
     }
 
     $msiExtractDir = Join-Path $env:TEMP "otelcol-msi-extract"
+    $msiLogPath = Join-Path $env:TEMP "otelcol-msi-extract.log"
     Remove-Item $msiExtractDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item $msiLogPath -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $msiExtractDir | Out-Null
 
     try {
         Write-Host "  Extracting MSI with msiexec..." -ForegroundColor Cyan
-        $msiArgs = "/a `"$MsiPath`" /qn TARGETDIR=`"$msiExtractDir`""
+        $msiArgs = "/a `"$MsiPath`" /qn /norestart /L*v `"$msiLogPath`" TARGETDIR=`"$msiExtractDir`""
         $msiProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru -NoNewWindow -ErrorAction Stop
 
         if ($msiProcess.ExitCode -ne 0 -and $msiProcess.ExitCode -ne 3010) {
             Write-Host "✗ MSI extraction failed with exit code $($msiProcess.ExitCode)." -ForegroundColor Red
+            Write-Host "  MSI diagnostic log: $msiLogPath" -ForegroundColor Yellow
             return $false
         }
 
@@ -1485,46 +1659,53 @@ $OTEL_WINDOWS_CHECKSUM_URL = "https://github.com/open-telemetry/opentelemetry-co
 $OTEL_PATH = "$env:TEMP\otelcol.tar.gz"
 $OTEL_MSI_PATH = "$env:TEMP\otelcol-contrib.msi"
 
-# Windows 10 1803+ / Server 2019+ include tar. Legacy hosts use MSI extraction.
-$hasTar = $null -ne (Get-Command tar -ErrorAction SilentlyContinue)
+# Windows 10 1803+ / Server 2019+ normally include tar. Older hosts use the
+# built-in .NET extractor, with MSI retained only as a final fallback.
+$forcePortableExtraction = Test-EnvFlag @("ELVEN_FORCE_PORTABLE_ARCHIVE_EXTRACTION")
+$hasTar = -not $forcePortableExtraction -and $null -ne (Get-Command tar -ErrorAction SilentlyContinue)
 $collectorExtracted = $false
 
 Write-Host "Extracting files..." -ForegroundColor Green
 
-if ($hasTar) {
+if (-not (Download-WithRetry -Url $OTEL_ARCHIVE_URL -OutputPath $OTEL_PATH)) {
+    Write-Host "✗ Failed to download Collector archive after multiple attempts." -ForegroundColor Red
+    Write-Host "  URL tried: $OTEL_ARCHIVE_URL" -ForegroundColor Yellow
+} elseif (-not (Verify-Sha256FromManifest -FilePath $OTEL_PATH -AssetName $OTEL_ARCHIVE_ASSET_NAME -ManifestUrl $OTEL_WINDOWS_CHECKSUM_URL)) {
+    Remove-Item $OTEL_PATH -Force -ErrorAction SilentlyContinue
+    Write-Host "  ⚠ Collector archive checksum validation failed." -ForegroundColor Yellow
+} elseif ($hasTar) {
     Write-Host "  Using native tar for extraction" -ForegroundColor Cyan
 
-    if (-not (Download-WithRetry -Url $OTEL_ARCHIVE_URL -OutputPath $OTEL_PATH)) {
-        Write-Host "✗ Failed to download Collector archive after multiple attempts." -ForegroundColor Red
-        Write-Host "  URL tried: $OTEL_ARCHIVE_URL" -ForegroundColor Yellow
-    } elseif (-not (Verify-Sha256FromManifest -FilePath $OTEL_PATH -AssetName $OTEL_ARCHIVE_ASSET_NAME -ManifestUrl $OTEL_WINDOWS_CHECKSUM_URL)) {
-        Remove-Item $OTEL_PATH -Force -ErrorAction SilentlyContinue
-        Write-Host "  ⚠ Collector archive checksum validation failed." -ForegroundColor Yellow
-    } else {
-        try {
-            $tarOutput = tar -xzf $OTEL_PATH -C $INSTALL_DIR 2>&1
-            if ($LASTEXITCODE -eq 0 -and (Test-Path $EXE_PATH)) {
-                Write-Host "✓ Extraction complete with tar!" -ForegroundColor Green
-                $collectorExtracted = $true
-            } else {
-                Write-Host "  ⚠ tar extraction did not produce the expected executable." -ForegroundColor Yellow
-                Write-Host "  tar exit code: $LASTEXITCODE" -ForegroundColor Yellow
-                if ($tarOutput) {
-                    Write-Host "  Output: $tarOutput" -ForegroundColor Gray
-                }
+    try {
+        $tarOutput = tar -xzf $OTEL_PATH -C $INSTALL_DIR 2>&1
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $EXE_PATH)) {
+            Write-Host "✓ Extraction complete with tar!" -ForegroundColor Green
+            $collectorExtracted = $true
+        } else {
+            Write-Host "  ⚠ tar extraction did not produce the expected executable." -ForegroundColor Yellow
+            Write-Host "  tar exit code: $LASTEXITCODE" -ForegroundColor Yellow
+            if ($tarOutput) {
+                Write-Host "  Output: $tarOutput" -ForegroundColor Gray
             }
-        } catch {
-            Write-Host "  ⚠ Error during tar extraction: $($_.Exception.Message)" -ForegroundColor Yellow
         }
+    } catch {
+        Write-Host "  ⚠ Error during tar extraction: $($_.Exception.Message)" -ForegroundColor Yellow
     }
 } else {
-    Write-Host "  tar command not found; using official MSI extraction for this legacy Windows host." -ForegroundColor Yellow
+    $collectorExtracted = Expand-OtelCollectorArchivePortable `
+        -ArchivePath $OTEL_PATH `
+        -DestinationPath $EXE_PATH
+}
+
+if (-not $collectorExtracted -and $hasTar -and (Test-Path -LiteralPath $OTEL_PATH -PathType Leaf)) {
+    Write-Host "  Native tar failed; trying built-in .NET extraction..." -ForegroundColor Cyan
+    $collectorExtracted = Expand-OtelCollectorArchivePortable `
+        -ArchivePath $OTEL_PATH `
+        -DestinationPath $EXE_PATH
 }
 
 if (-not $collectorExtracted) {
-    if ($hasTar) {
-        Write-Host "  Falling back to official MSI extraction..." -ForegroundColor Cyan
-    }
+    Write-Host "  Falling back to official MSI extraction..." -ForegroundColor Cyan
 
     $collectorExtracted = Install-OtelCollectorFromMsi `
         -MsiUrl $OTEL_MSI_URL `

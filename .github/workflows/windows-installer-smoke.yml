@@ -50,6 +50,8 @@ jobs:
           ELVEN_INSTANCE_NAME: "github-windows-smoke"
           ELVEN_CUSTOMER_NAME: "elven-ci"
           ELVEN_ENVIRONMENT: "test"
+          # Exercise the PowerShell 5.1/.NET path used by Windows Server 2016.
+          ELVEN_FORCE_PORTABLE_ARCHIVE_EXTRACTION: "true"
         run: |
           function Invoke-ElvenInstaller {
             $global:LASTEXITCODE = 0
