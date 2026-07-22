@@ -238,7 +238,6 @@ function Set-CollectorPathAcl {
             '/T',
             '/Q'
         )
-        Invoke-CollectorIcacls -Path $Path -Arguments @('/setowner', '*S-1-5-18', '/T', '/Q')
     } else {
         Invoke-CollectorIcacls -Path $Path -Arguments @(
             '/inheritance:r',
